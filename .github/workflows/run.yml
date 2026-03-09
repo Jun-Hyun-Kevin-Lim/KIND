@@ -1,32 +1,59 @@
-name: KIND + DART rights issue -> Google Sheets
+#action
+name: KIND Pipeline -> Google Sheets
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 0 * * *"  # 매일 09:10 KST (UTC 00:10)
+    - cron: "10 0 * * *"   # 매일 09:10 KST (UTC 00:10)
 
 jobs:
-  run:
+  run-kind-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      TZ: Asia/Seoul
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
+      HEADLESS: "true"
+      LIMIT: "30"
+      DUMP_SHEET_NAME: "RAW_dump"
+      SEEN_SHEET_NAME: "seen"
+      RIGHTS_SHEET_NAME: "유상증자"
+      BOND_SHEET_NAME: "주식연계채권"
+      PARSE_LOG_SHEET_NAME: "parse_log"
+      KEYWORDS: "유상증자결정,전환사채권발행결정,교환사채권발행결정,신주인수권부사채권발행결정"
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
 
-      - name: Run
-        env:
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-          DART_API_KEY: ${{ secrets.DART_API_KEY }}
-          HEADLESS: "true"
-          LIMIT: "30"
-          SKIP_SEEN: "false"      # ✅ seen으로 스킵할지 (false면 계속 업데이트)
-          DART_LOOKBACK_DAYS: "14"
+      - name: Install Playwright Chromium
         run: |
-          python main.py
+          python -m playwright install chromium
+
+      - name: Run RAW scraper
+        run: |
+          python main_raw.py
+
+      - name: Run parser
+        run: |
+          python main_parse.py
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-debug-files
+          path: out/debug/
+          if-no-files-found: ignore
