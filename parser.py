@@ -909,6 +909,58 @@ def extract_product_type_from_pairs_and_tables(pairs, tables) -> str:
     return ""
 
 
+def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
+    text = normalize_text(text)
+    if not text:
+        return "", ""
+
+    ratio = ""
+    ytc = ""
+
+    percent_matches = re.findall(r"-?\d+(?:\.\d+)?\s*%", text)
+    percent_vals = []
+    for p in percent_matches:
+        val = parse_float_like(p)
+        if val is not None:
+            percent_vals.append((clean_percent(p), val))
+
+    explicit_ratio_patterns = [
+        r"(?:콜옵션\s*행사비율|매도청구권\s*행사비율|Call\s*비율|콜옵션\s*비율|매도청구권\s*비율|권면총액\s*대비\s*비율|행사비율)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
+        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:에\s*해당하는)?\s*(?:콜옵션|매도청구권)",
+    ]
+    for pat in explicit_ratio_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            ratio = f"{m.group(1)}%"
+            break
+
+    explicit_ytc_patterns = [
+        r"(?:YTC|Yield\s*To\s*Call|조기상환수익률|조기상환이율|연복리수익률)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
+        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:의\s*)?(?:조기상환수익률|연복리수익률|YTC)",
+    ]
+    for pat in explicit_ytc_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            ytc = f"{m.group(1)}%"
+            break
+
+    if not ratio:
+        for raw, val in percent_vals:
+            if 0 < val <= 100:
+                ratio = raw
+                break
+
+    if not ytc:
+        for raw, val in percent_vals:
+            if raw == ratio:
+                continue
+            if -50 <= val <= 50:
+                ytc = raw
+                break
+
+    return ratio, ytc
+
+
 def parse_bond_record(rec: Dict[str, Any]):
     title = rec["title"]
     tables = rec["tables"]
