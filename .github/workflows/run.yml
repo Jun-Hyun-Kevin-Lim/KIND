@@ -14,7 +14,7 @@ jobs:
     env:
       TZ: Asia/Seoul
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-      GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
+      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       HEADLESS: "true"
       LIMIT: "30"
       DUMP_SHEET_NAME: "RAW_dump"
@@ -27,6 +27,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check env exists
+        run: |
+          echo "GOOGLE_SHEET_ID length: ${#GOOGLE_SHEET_ID}"
+          echo "GOOGLE_CREDENTIALS_JSON length: ${#GOOGLE_CREDENTIALS_JSON}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
