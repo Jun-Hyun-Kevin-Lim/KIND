@@ -39,6 +39,7 @@ RUN_ONE_ACPTNO = os.getenv("RUN_ONE_ACPTNO", "").strip()
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 GOOGLE_CREDENTIALS_JSON = (
     os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    or os.environ.get("GOOGLE_CREDS", "").strip()
 )
 
 DUMP_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_dump")
