@@ -12,6 +12,7 @@ import pandas as pd
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 GOOGLE_CREDENTIALS_JSON = (
     os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    or os.environ.get("GOOGLE_CREDS", "").strip()
 )
 
 RAW_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_dump")
