@@ -4,6 +4,7 @@ import re
 import json
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 import gspread
 import pandas as pd
@@ -375,56 +376,155 @@ def parse_rights_record(rec: Dict[str, Any]):
 
     row = {h: "" for h in RIGHTS_HEADERS}
     missing = []
+    suspicious = []
 
-    row["회사명"] = extract_company_name(title)
+    row["회사명"] = first_nonempty(
+        detect_company_from_pairs(pairs),
+        extract_company_name(title)
+    )
+
     row["보고서명"] = detect_report_type(title) or title
-    row["상장시장"] = detect_market_from_title(title)
-    row["최초 이사회결의일"] = find_value_by_left_keywords(pairs, ["최초 이사회결의일"])
-    row["증자방식"] = find_value_by_left_keywords(pairs, ["증자방식", "배정방법", "배정방식"])
-    row["발행상품"] = find_value_by_left_keywords(pairs, ["발행할 주식의 종류", "주식의 종류", "발행상품"])
-    row["신규발행주식수"] = fmt_number(find_numeric_value_by_keywords(pairs, ["신주발행수", "신규발행주식수", "발행주식수", "발행할 주식의 총수"]))
-    row["확정발행가(원)"] = fmt_number(find_numeric_value_by_keywords(pairs, ["확정발행가액", "확정 발행가액", "확정발행가", "발행가액", "1주당 발행가액"]))
-    row["기준주가"] = fmt_number(find_numeric_value_by_keywords(pairs, ["기준주가", "산정기준주가"]))
-    row["할인(할증률)"] = clean_percent(find_value_by_left_keywords(pairs, ["할인율", "할인(할증)율", "할인(할증률)", "할증률"]))
-    row["증자전 주식수"] = fmt_number(find_numeric_value_by_keywords(pairs, ["증자전 발행주식총수", "증자전 주식수", "발행주식총수(증자전)", "기발행주식수"]))
-    row["납입일"] = find_value_by_left_keywords(pairs, ["납입일"])
-    row["신주의 배당기산일"] = find_value_by_left_keywords(pairs, ["신주의 배당기산일"])
-    row["신주의 상장 예정일"] = first_nonempty(
-        find_value_by_left_keywords(pairs, ["신주의 상장예정일"]),
-        find_value_by_left_keywords(pairs, ["신주의 상장 예정일"])
+
+    row["상장시장"] = first_nonempty(
+        detect_market_from_pairs(pairs),
+        detect_market_from_title(title)
     )
-    row["이사회결의일"] = first_nonempty(
-        find_value_by_left_keywords(pairs, ["이사회결의일"]),
-        find_value_by_left_keywords(pairs, ["이사회 결의일"])
+
+    row["최초 이사회결의일"] = get_valid_date_by_keywords(
+        pairs, ["최초 이사회결의일", "최초이사회결의일"]
     )
+
+    row["이사회결의일"] = get_valid_date_by_keywords(
+        pairs, ["이사회결의일", "이사회 결의일", "이사회결의일(결정일)", "결정일"]
+    )
+
+    if not row["최초 이사회결의일"]:
+        row["최초 이사회결의일"] = row["이사회결의일"]
+
+    row["납입일"] = get_valid_date_by_keywords(
+        pairs, ["납입일", "납입기일", "청약기일 및 납입일", "신주의 납입기일", "신주납입기일"]
+    )
+
+    row["신주의 배당기산일"] = get_valid_date_by_keywords(
+        pairs, ["신주의 배당기산일", "배당기산일"]
+    )
+
+    row["신주의 상장 예정일"] = get_valid_date_by_keywords(
+        pairs,
+        ["신주의 상장예정일", "신주의 상장 예정일", "상장예정일", "신주 상장예정일", "상장 예정일", "신주상장예정일"]
+    )
+
+    row["증자방식"] = find_value_by_left_keywords(
+        pairs, ["증자방식", "배정방법", "배정방식", "발행방법"]
+    )
+
+    issue_shares, issue_type = extract_issue_shares_and_type_from_tables(tables)
+
+    if issue_shares:
+        row["신규발행주식수"] = fmt_number(issue_shares)
+
+    if issue_type:
+        row["발행상품"] = issue_type
+
+    if not row["신규발행주식수"]:
+        row["신규발행주식수"] = fmt_number(find_numeric_value_by_keywords_expanded(
+            pairs,
+            [
+                "신주발행수", "신규발행주식수", "발행주식수", "발행할 주식의 총수",
+                "신주의 종류와 수", "신주의종류와수", "발행예정주식수",
+                "발행예정주식", "신주발행", "발행할주식"
+            ]
+        ))
+
+    if not row["발행상품"]:
+        row["발행상품"] = first_nonempty(
+            find_value_by_left_keywords(
+                pairs, ["발행할 주식의 종류", "주식의 종류", "발행상품", "신주의 종류", "신주의 종류와 수"]
+            ),
+            "보통주식" if row["신규발행주식수"] else ""
+        )
+
+    row["확정발행가(원)"] = fmt_number(
+        scan_price_like_from_pairs(
+            pairs,
+            target_kws=["신주발행가액", "신주 발행가액", "예정발행가액", "확정발행가액", "확정 발행가액", "확정발행가", "발행가액", "1주당 발행가액", "1주당 확정발행가액"],
+            stop_kws=["자금", "증자방식", "기준", "할인", "할증", "증자전", "주식수", "납입", "방법", "산정", "일정", "발행목적"]
+        )
+    )
+
+    row["기준주가"] = fmt_number(
+        scan_price_like_from_pairs(
+            pairs,
+            target_kws=["기준주가", "산정기준주가", "기준발행가액"],
+            stop_kws=["자금", "증자방식", "할인", "할증", "증자전", "납입", "방법", "산정", "일정", "신주발행가", "확정발행가", "예정발행가", "발행목적"]
+        )
+    )
+
+    row["할인(할증률)"] = clean_percent(find_value_by_left_keywords(
+        pairs,
+        [
+            "할인율", "할인(할증)율", "할인(할증률)", "할증률",
+            "할인율 또는 할증률", "발행가액 산정시 할인율"
+        ]
+    ))
+
+    prev_shares = extract_prev_shares_from_tables(tables)
+    if prev_shares:
+        row["증자전 주식수"] = fmt_number(prev_shares)
+
+    if not row["증자전 주식수"]:
+        row["증자전 주식수"] = fmt_number(find_numeric_value_by_keywords_expanded(
+            pairs,
+            [
+                "증자전 발행주식총수", "증자전 주식수", "발행주식총수(증자전)",
+                "기발행주식수", "기발행주식총수", "발행주식총수",
+                "증자전발행주식총수", "증자전발행주식총수(보통주식)", "증자전주식수"
+            ]
+        ))
+
     row["자금용도"] = extract_use_of_funds(tables)
     row["투자자"] = extract_investor_text(tables)
     row["링크"] = rec["src_url"]
     row["접수번호"] = rec["acpt_no"]
 
     if is_correction_title(title):
-        v = correction_override_value(pairs, ["확정발행가액", "확정발행가", "발행가액"])
+        v = correction_override_value(
+            pairs,
+            [
+                "확정발행가액", "확정발행가", "발행가액",
+                "신주발행가액", "신주 발행가액", "예정발행가액"
+            ]
+        )
         if v:
-            row["확정발행가(원)"] = fmt_number(parse_float(v))
+            row["확정발행가(원)"] = fmt_number(parse_float_like(v))
 
-        v = correction_override_value(pairs, ["납입일"])
-        if v:
+        v = correction_override_value(pairs, ["납입일", "납입기일", "신주납입기일"])
+        if v and looks_like_valid_date(v):
             row["납입일"] = v
 
-        v = correction_override_value(pairs, ["신주의 상장예정일", "신주의 상장 예정일"])
-        if v:
+        v = correction_override_value(
+            pairs,
+            ["신주의 상장예정일", "신주의 상장 예정일", "상장예정일", "신주상장예정일"]
+        )
+        if v and looks_like_valid_date(v):
             row["신주의 상장 예정일"] = v
 
+        v = correction_override_value(
+            pairs, ["이사회결의일", "이사회 결의일", "이사회결의일(결정일)", "결정일"]
+        )
+        if v and looks_like_valid_date(v):
+            row["이사회결의일"] = v
+
     use_of_funds_total = extract_use_of_funds_total_won(tables)
-    new_shares = parse_float(row["신규발행주식수"])
-    price = parse_float(row["확정발행가(원)"])
+    new_shares = parse_float_like(row["신규발행주식수"])
+    price = parse_float_like(row["확정발행가(원)"])
 
     if use_of_funds_total is not None and use_of_funds_total > 0:
         row["확정발행금액(억원)"] = fmt_eok_from_won(use_of_funds_total)
     elif new_shares is not None and price is not None:
         row["확정발행금액(억원)"] = fmt_eok_from_won(new_shares * price)
 
-    pre_shares = parse_float(row["증자전 주식수"])
+    pre_shares = parse_float_like(row["증자전 주식수"])
     if new_shares is not None and pre_shares not in (None, 0):
         row["증자비율"] = f"{(new_shares / pre_shares) * 100:.2f}%"
 
@@ -434,7 +534,33 @@ def parse_rights_record(rec: Dict[str, Any]):
         if not normalize_text(row[h]):
             missing.append(h)
 
-    return row, missing
+    price_val = parse_float_like(row["확정발행가(원)"])
+    if price_val is not None and price_val <= 50:
+        suspicious.append("확정발행가(원)")
+
+    base_val = parse_float_like(row["기준주가"])
+    if base_val is not None and base_val <= 50:
+        suspicious.append("기준주가")
+
+    if row["납입일"] and not looks_like_valid_date(row["납입일"]):
+        suspicious.append("납입일")
+
+    if row["신주의 상장 예정일"] and not looks_like_valid_date(row["신주의 상장 예정일"]):
+        suspicious.append("신주의 상장 예정일")
+
+    if row["이사회결의일"] and not looks_like_valid_date(row["이사회결의일"]):
+        suspicious.append("이사회결의일")
+
+    if row["투자자"] and any(x in row["투자자"] for x in ["관계", "지분", "합계", "소계", "정정", "출자자수", "명"]):
+        suspicious.append("투자자")
+
+    if row["자금용도"] and "(원)" in row["자금용도"]:
+        suspicious.append("자금용도")
+
+    if row["회사명"] in ["유", "코", "넥"]:
+        suspicious.append("회사명")
+
+    return row, missing, suspicious
 
 
 def parse_bond_record(rec: Dict[str, Any]):
@@ -449,39 +575,168 @@ def parse_bond_record(rec: Dict[str, Any]):
     row["회사명"] = extract_company_name(title)
     row["보고서명"] = detect_report_type(title) or title
     row["상장시장"] = detect_market_from_title(title)
-    row["최초 이사회결의일"] = find_value_by_left_keywords(pairs, ["최초 이사회결의일"])
-    row["권면총액(원)"] = fmt_number(find_numeric_value_by_keywords(pairs, ["사채의 권면총액", "권면총액", "발행총액"]))
-    row["Coupon"] = first_nonempty(find_value_by_left_keywords(pairs, ["표면이자율"]), find_value_by_left_keywords(pairs, ["표면금리"]))
-    row["YTM"] = first_nonempty(find_value_by_left_keywords(pairs, ["만기이자율"]), find_value_by_left_keywords(pairs, ["만기보장수익률"]), find_value_by_left_keywords(pairs, ["Yield To Maturity"]))
-    row["만기"] = first_nonempty(find_value_by_left_keywords(pairs, ["만기일"]), find_value_by_left_keywords(pairs, ["사채만기일"]))
-    row["전환청구 시작"] = first_nonempty(find_value_by_left_keywords(pairs, ["전환청구기간 시작일"]), find_value_by_left_keywords(pairs, ["전환청구 시작일"]), find_value_by_left_keywords(pairs, ["권리행사 시작일"]))
-    row["전환청구 종료"] = first_nonempty(find_value_by_left_keywords(pairs, ["전환청구기간 종료일"]), find_value_by_left_keywords(pairs, ["전환청구 종료일"]), find_value_by_left_keywords(pairs, ["권리행사 종료일"]))
-    row["Put Option"] = find_value_by_left_keywords(pairs, ["조기상환청구권", "Put Option", "풋옵션"])
-    row["Call Option"] = find_value_by_left_keywords(pairs, ["매도청구권", "Call Option", "콜옵션"])
-    row["Call 비율"] = first_nonempty(
-        clean_percent(find_value_by_left_keywords(pairs, ["콜옵션 행사비율", "매도청구권 행사비율", "Call 비율"])),
-        clean_percent(find_value_by_left_keywords(pairs, ["최대주주등에게 부여된 콜옵션 비율"]))
+
+    row["최초 이사회결의일"] = find_value_by_left_keywords(
+        pairs,
+        ["최초 이사회결의일", "이사회결의일", "이사회결의일(결정일)", "결정일"]
     )
-    row["YTC"] = find_value_by_left_keywords(pairs, ["조기상환수익률", "YTC", "Yield To Call"])
-    row["모집방식"] = find_value_by_left_keywords(pairs, ["공모여부", "모집 또는 매출의 구분", "모집방법", "모집방식"])
-    row["발행상품"] = row["구분"]
-    row["행사(전환)가액(원)"] = fmt_number(find_numeric_value_by_keywords(pairs, ["전환가액", "교환가액", "행사가액", "권리행사가액"]))
-    row["전환주식수"] = fmt_number(find_numeric_value_by_keywords(pairs, ["전환에 따라 발행할 주식수", "전환주식수", "교환대상 주식수", "행사주식수"]))
-    row["주식총수대비 비율"] = clean_percent(find_value_by_left_keywords(pairs, ["주식총수 대비 비율", "발행주식총수 대비 비율", "총수대비 비율"]))
-    row["Refixing Floor"] = clean_percent(find_value_by_left_keywords(pairs, ["최저 조정가액", "조정가액 하한", "Refixing Floor", "하한가액"]))
-    row["납입일"] = find_value_by_left_keywords(pairs, ["납입일"])
+
+    row["권면총액(원)"] = fmt_number(find_numeric_value_by_keywords(
+        pairs,
+        [
+            "사채의 권면총액", "권면총액", "발행총액", "사채의 총액",
+            "권면(전자등록)총액", "사채의 권면(전자등록)총액(원)",
+            "권면(전자등록)총액(원)", "전자등록총액"
+        ]
+    ))
+
+    row["Coupon"] = first_nonempty(
+        find_value_by_left_keywords(pairs, ["표면이자율", "표면이자율(%)", "표면금리", "이표이자율"])
+    )
+
+    row["YTM"] = first_nonempty(
+        find_value_by_left_keywords(pairs, ["만기이자율", "만기이자율(%)", "만기보장수익률", "만기수익률", "Yield To Maturity"])
+    )
+
+    row["만기"] = first_nonempty(
+        find_value_by_left_keywords(pairs, ["만기일", "사채만기일", "상환기일", "만기"])
+    )
+
+    start_val = first_nonempty(
+        find_value_by_left_keywords(pairs, [
+            "전환청구기간 시작일", "전환청구 시작일", "권리행사 시작일",
+            "교환청구기간 시작일", "교환청구 시작일", "권리행사기간 시작일"
+        ])
+    )
+    end_val = first_nonempty(
+        find_value_by_left_keywords(pairs, [
+            "전환청구기간 종료일", "전환청구 종료일", "권리행사 종료일",
+            "교환청구기간 종료일", "교환청구 종료일", "권리행사기간 종료일"
+        ])
+    )
+
+    if not start_val or not end_val:
+        p_start, p_end = extract_period_dates_from_tables(
+            tables,
+            ["전환청구기간", "교환청구기간", "권리행사기간"]
+        )
+        row["전환청구 시작"] = start_val or p_start
+        row["전환청구 종료"] = end_val or p_end
+    else:
+        row["전환청구 시작"] = start_val
+        row["전환청구 종료"] = end_val
+
+    put_val = find_value_by_left_keywords(
+        pairs,
+        ["조기상환청구권", "Put Option", "풋옵션", "조기상환권", "사채권자의 조기상환청구권"]
+    )
+    call_val = find_value_by_left_keywords(
+        pairs,
+        ["매도청구권", "Call Option", "콜옵션", "중도상환청구권", "발행회사의 매도청구권"]
+    )
+
+    row["Put Option"] = put_val or extract_option_details_from_tables(tables, "put")
+    row["Call Option"] = call_val or extract_option_details_from_tables(tables, "call")
+
+    row["Call 비율"] = first_nonempty(
+        clean_percent(find_value_by_left_keywords(pairs, [
+            "콜옵션 행사비율", "매도청구권 행사비율", "Call 비율",
+            "콜옵션 비율", "매도청구권 비율",
+            "최대주주등에게 부여된 콜옵션 비율",
+            "최대주주등에게 부여된 매도청구권 비율",
+            "권면총액 대비 비율", "행사비율"
+        ]))
+    )
+
+    row["YTC"] = first_nonempty(
+        find_value_by_left_keywords(
+            pairs,
+            ["조기상환수익률", "YTC", "Yield To Call", "조기상환이율", "조기상환수익률(%)", "연복리수익률"]
+        )
+    )
+
+    # Call 비율 / YTC를 본문 설명문에서도 한번 더 보조 추출
+    if not row["Call 비율"] or not row["YTC"]:
+        ratio2, ytc2 = extract_call_ratio_and_ytc_from_text(row["Call Option"])
+        if not row["Call 비율"]:
+            row["Call 비율"] = ratio2
+        if not row["YTC"]:
+            row["YTC"] = ytc2
+
+    row["모집방식"] = find_value_by_left_keywords(
+        pairs,
+        ["공모여부", "모집 또는 매출의 구분", "모집방법", "모집방식", "사채발행방법", "발행방법"]
+    )
+
+    row["발행상품"] = extract_product_type_from_pairs_and_tables(pairs, tables) or row["구분"]
+
+    row["행사(전환)가액(원)"] = fmt_number(find_numeric_value_by_keywords(
+        pairs,
+        [
+            "전환가액", "교환가액", "행사가액", "권리행사가액",
+            "전환가액(원/주)", "교환가액(원/주)",
+            "행사가액(원/주)", "권리행사가액(원/주)"
+        ]
+    ))
+
+    row["전환주식수"] = fmt_number(find_numeric_value_by_keywords(
+        pairs,
+        [
+            "전환에 따라 발행할 주식수", "전환에 따라 발행할 주식의 수",
+            "전환주식수", "교환대상 주식수", "교환대상주식수",
+            "행사주식수", "권리행사로 발행할 주식수", "주식수"
+        ]
+    ))
+
+    row["주식총수대비 비율"] = clean_percent(find_value_by_left_keywords(
+        pairs,
+        [
+            "주식총수 대비 비율", "발행주식총수 대비 비율", "총수대비 비율",
+            "주식총수 대비 비율(%)", "발행주식총수 대비 비율(%)"
+        ]
+    ))
+
+    row["Refixing Floor"] = clean_percent(find_value_by_left_keywords(
+        pairs,
+        [
+            "최저 조정가액", "조정가액 하한", "Refixing Floor", "하한가액",
+            "최저 조정가액(원)", "최저조정가액", "리픽싱 하한", "리픽싱하한"
+        ]
+    ))
+
+    row["납입일"] = find_value_by_left_keywords(
+        pairs,
+        ["납입일", "납입기일", "발행일", "지급일"]
+    )
+
     row["자금용도"] = extract_use_of_funds(tables)
     row["투자자"] = extract_investor_text(tables)
     row["링크"] = rec["src_url"]
     row["접수번호"] = rec["acpt_no"]
 
     if is_correction_title(title):
-        v = correction_override_value(pairs, ["전환가액", "교환가액", "행사가액", "권리행사가액"])
+        v = correction_override_value(
+            pairs,
+            [
+                "전환가액", "교환가액", "행사가액", "권리행사가액",
+                "전환가액(원/주)", "교환가액(원/주)",
+                "행사가액(원/주)", "권리행사가액(원/주)"
+            ]
+        )
         if v:
             row["행사(전환)가액(원)"] = fmt_number(parse_float(v))
-        v = correction_override_value(pairs, ["납입일"])
+
+        v = correction_override_value(pairs, ["납입일", "납입기일"])
         if v:
             row["납입일"] = v
+
+        v = correction_override_value(pairs, ["권면총액", "발행총액", "사채의 권면총액"])
+        if v:
+            row["권면총액(원)"] = fmt_number(parse_float(v))
+
+        v = correction_override_value(pairs, ["전환주식수", "교환대상 주식수", "행사주식수"])
+        if v:
+            row["전환주식수"] = fmt_number(parse_float(v))
 
     for h in BOND_HEADERS:
         if h in ["링크", "접수번호"]:
