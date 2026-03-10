@@ -2914,14 +2914,16 @@ def find_event_row(ws, headers: List[str], row_dict: Dict[str, Any], sheet_type:
 # - 있으면 UPDATE, 없으면 APPEND
 def upsert_structured_row(ws, headers: List[str], row_dict: Dict[str, Any], sheet_type: str):
     row_values = [row_dict.get(h, "") for h in headers]
+
+    # 동일 접수번호일 때만 UPDATE
     target_row = find_row_by_key(ws, "접수번호", str(row_dict.get("접수번호", "")))
-    if not target_row:
-        target_row = find_event_row(ws, headers, row_dict, sheet_type)
 
     end_col = gspread.utils.rowcol_to_a1(1, len(headers)).rstrip("1")
     if target_row:
         ws.update(f"A{target_row}:{end_col}{target_row}", [row_values])
         return "UPDATE", target_row
+
+    # 접수번호가 다르면 무조건 APPEND
     ws.append_row(row_values, value_input_option="RAW")
     return "APPEND", None
 
