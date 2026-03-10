@@ -2055,24 +2055,127 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
     return ratio, ytc
 
-
 # [기간형 날짜 2개 추출]
-# - 전환청구기간 / 권리행사기간 같은 구간형 라벨에서 시작일/종료일 추출
-def extract_period_dates_from_tables(tables: List[pd.DataFrame], corr_after: Dict[str, str], section_keywords: List[str]) -> Tuple[str, str]:
+# - 전환청구기간 / 교환청구기간 / 권리행사기간 블록에서 시작일/종료일 추출
+def extract_period_dates_from_tables(
+    tables: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+    section_keywords: List[str]
+) -> Tuple[str, str]:
+    date_pat = r"\d{4}[.\-/년]\s*\d{1,2}[.\-/월]\s*\d{1,2}일?"
+
+    def _extract_dates(text: Any) -> List[str]:
+        if not text:
+            return []
+        return re.findall(date_pat, normalize_text(text))
+
+    def _neighbor_dates(arr, rr: int, cc: int) -> List[str]:
+        R, C = arr.shape
+        out = []
+
+        for r2, c2 in [
+            (rr, cc + 1), (rr, cc + 2),
+            (rr + 1, cc), (rr + 1, cc + 1), (rr + 1, cc + 2),
+            (rr + 2, cc), (rr + 2, cc + 1), (rr + 2, cc + 2),
+        ]:
+            if 0 <= r2 < R and 0 <= c2 < C:
+                out.extend(_extract_dates(arr[r2][c2]))
+
+        row_join = " ".join([normalize_text(x) for x in arr[rr].tolist() if normalize_text(x)])
+        out.extend(_extract_dates(row_join))
+
+        return out
+
+    # 1순위: 정정공시 corr_after
     if corr_after:
         for k, v in corr_after.items():
             if any(_norm(p) in _norm(k) for p in section_keywords):
-                dates = re.findall(r'\d{4}[-년\.\s]+\d{1,2}[-월\.\s]+\d{1,2}', v)
+                dates = _extract_dates(v)
                 if len(dates) >= 2:
                     return _format_date(dates[0]), _format_date(dates[-1])
 
-    text_lines = all_text_lines(tables)
-    date_pat = r"\d{4}[.\-/년]\s*\d{1,2}[.\-/월]\s*\d{1,2}일?"
-    for line in text_lines:
-        if contains_any(line, section_keywords):
-            dates = re.findall(date_pat, line)
+                if "시작일" in str(v) or "종료일" in str(v):
+                    start_date = ""
+                    end_date = ""
+
+                    start_m = re.search(r"시작일.*?(" + date_pat + r")", str(v))
+                    end_m = re.search(r"종료일.*?(" + date_pat + r")", str(v))
+
+                    if start_m:
+                        start_date = _format_date(start_m.group(1))
+                    if end_m:
+                        end_date = _format_date(end_m.group(1))
+
+                    if start_date and end_date:
+                        return start_date, end_date
+
+    # 2순위: 실제 표에서 시작일 / 종료일 구조 탐색
+    for df in tables:
+        try:
+            arr = df.fillna("").astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
+
+        for r in range(R):
+            row_vals = [normalize_text(x) for x in arr[r].tolist()]
+            row_join = " ".join([x for x in row_vals if x])
+            row_norm = _norm(row_join)
+
+            if not any(_norm(k) in row_norm for k in section_keywords):
+                continue
+
+            start_date = ""
+            end_date = ""
+
+            # 2-1) 시작일 / 종료일 포함 행 우선
+            for rr in range(r, min(r + 4, R)):
+                local_vals = [normalize_text(x) for x in arr[rr].tolist()]
+                local_join = " ".join([x for x in local_vals if x])
+
+                if "시작일" in local_join and not start_date:
+                    dates = _extract_dates(local_join)
+                    if dates:
+                        start_date = _format_date(dates[-1])
+
+                if "종료일" in local_join and not end_date:
+                    dates = _extract_dates(local_join)
+                    if dates:
+                        end_date = _format_date(dates[-1])
+
+            if start_date and end_date:
+                return start_date, end_date
+
+            # 2-2) 셀 단위 탐색
+            for rr in range(r, min(r + 4, R)):
+                for cc in range(C):
+                    cell = normalize_text(arr[rr][cc])
+
+                    if "시작일" in cell and not start_date:
+                        dates = _neighbor_dates(arr, rr, cc)
+                        if dates:
+                            start_date = _format_date(dates[0])
+
+                    if "종료일" in cell and not end_date:
+                        dates = _neighbor_dates(arr, rr, cc)
+                        if dates:
+                            end_date = _format_date(dates[0])
+
+            if start_date and end_date:
+                return start_date, end_date
+
+            # 2-3) 마지막 fallback
+            block_text = []
+            for rr in range(r, min(r + 4, R)):
+                block_text.append(
+                    " ".join([normalize_text(x) for x in arr[rr].tolist() if normalize_text(x)])
+                )
+
+            dates = _extract_dates(" ".join(block_text))
             if len(dates) >= 2:
                 return _format_date(dates[0]), _format_date(dates[1])
+
     return "", ""
 
 
