@@ -1247,63 +1247,161 @@ def bond_type_product_name(title: str) -> str:
 # - "사채의 종류" 같은 표 라벨에서 실제 상품명 추출
 # - 못 찾으면 제목 기반 fallback
 def extract_product_type_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str], title: str) -> str:
-    labels = [
-        "1. 사채의 종류", "1.사채의종류", "사채의 종류", "사체의 종류",
-        "사채종류", "발행상품", "증권의 종류", "채권의 종류", "종류"
+    """
+    주식연계채권 발행상품 추출
+    우선순위:
+    1) 정정공시의 corr_after에서 '1. 사채의 종류' 계열 값
+    2) 실제 표에서 '1. 사채의 종류' 라벨의 오른쪽 / 아래 값
+    3) 같은 행 전체 문자열에서 추출
+    4) 마지막 fallback으로 제목 기반 전환사채/교환사채/BW
+    """
+
+    primary_labels = [
+        "1. 사채의 종류",
+        "1.사채의종류",
+        "사채의 종류",
+        "사채의종류",
+        "채권의 종류",
+        "채권의종류",
+        "증권의 종류",
+        "증권의종류",
     ]
 
-    def get_clean_product(text: str) -> str:
+    fallback_labels = [
+        "사채종류",
+        "발행상품",
+        "종류",
+    ]
+
+    def clean_candidate(text: str) -> str:
         if not text:
             return ""
-        t = re.sub(r'\s+', ' ', text).strip()
-        t = re.sub(r'(?:1\.\s*)?(?:사채|증권|채권)의\s*종류', '', t)
-        t = re.sub(r'\b종류\b', '', t)
-        t = t.replace('발행결정', '').strip()
 
-        pattern = r'((?:제\s*\d+\s*회)?[\s\w,()\-]*(?:무기명식|기명식|이권부|무보증|보증|사모|공모|비분리형|분리형)?[\s\w,()\-]*(?:전환사채|교환사채|신주인수권부사채))'
-        matches = re.findall(pattern, t)
-        if matches:
-            for m in matches:
-                res = _single_line(m)
-                if 4 <= len(res) <= 80:
-                    return res
+        t = normalize_text(text)
+        if not t:
+            return ""
 
+        # 라벨 제거
+        t = re.sub(r'^\s*1\.\s*', '', t)
+        t = re.sub(r'^(사채|채권|증권)의\s*종류\s*[:：]?\s*', '', t)
+        t = re.sub(r'^사채종류\s*[:：]?\s*', '', t)
+        t = re.sub(r'^발행상품\s*[:：]?\s*', '', t)
+        t = t.strip()
+
+        # 너무 짧거나 의미 없는 값 제거
+        bad_exact = {
+            "", "-", ".", "해당사항없음", "해당 없음", "없음", "해당사항 없음"
+        }
+        if t in bad_exact:
+            return ""
+
+        # 실제 상품명 패턴 우선
+        patterns = [
+            r'((?:제\s*\d+\s*회\s*)?[^|,;/]{0,80}?(?:전환사채|교환사채|신주인수권부사채))',
+            r'((?:무기명식|기명식|이권부|무보증|보증|사모|공모|비분리형|분리형|사모식)?[^|,;/]{0,80}?(?:전환사채|교환사채|신주인수권부사채))',
+        ]
+        for pat in patterns:
+            m = re.search(pat, t)
+            if m:
+                val = normalize_text(m.group(1))
+                if 3 <= len(val) <= 100:
+                    return val
+
+        # 핵심 상품 키워드라도 있으면 반환
         for name in ["전환사채", "교환사채", "신주인수권부사채"]:
             if name in t:
-                return name
+                return t
+
         return ""
 
+    # ------------------------------------------------------
+    # 1) 정정공시 corr_after 최우선
+    # ------------------------------------------------------
     if corr_after:
         for k, v in corr_after.items():
-            if any(_norm(lb) in _norm(k) for lb in labels):
-                cleaned = get_clean_product(v)
+            k_clean = _clean_label(k)
+            if any(_clean_label(lb) == k_clean for lb in primary_labels):
+                cleaned = clean_candidate(v)
                 if cleaned:
                     return cleaned
 
+        for k, v in corr_after.items():
+            k_norm = _norm(k)
+            if any(_norm(lb) in k_norm for lb in primary_labels + fallback_labels):
+                cleaned = clean_candidate(v)
+                if cleaned:
+                    return cleaned
+
+    # ------------------------------------------------------
+    # 2) 실제 표에서 '1. 사채의 종류' 탐색
+    # ------------------------------------------------------
     for df in dfs:
         try:
-            arr = df.astype(str).values
+            arr = df.fillna("").astype(str).values
         except Exception:
             continue
+
         R, C = arr.shape
+
         for r in range(R):
             for c in range(C):
-                if any(_clean_label(lb) in _clean_label(arr[r][c]) for lb in labels):
-                    for cc in range(c + 1, min(C, c + 5)):
-                        cleaned = get_clean_product(str(arr[r][cc]))
-                        if cleaned:
-                            return cleaned
-                    for rr in range(r + 1, min(R, r + 3)):
-                        cleaned = get_clean_product(str(arr[rr][c]))
-                        if cleaned:
-                            return cleaned
+                cell = normalize_text(arr[r][c])
+                if not cell:
+                    continue
 
-        for r in range(min(10, R)):
-            row_str = " ".join([str(x) for x in arr[r] if str(x).lower() != 'nan'])
-            cleaned = get_clean_product(row_str)
-            if cleaned:
-                return cleaned
+                cell_clean = _clean_label(cell)
 
+                # primary label 정확히 우선
+                is_primary = any(_clean_label(lb) == cell_clean for lb in primary_labels)
+                is_fallback = any(_clean_label(lb) == cell_clean for lb in fallback_labels)
+
+                if not (is_primary or is_fallback):
+                    continue
+
+                # 2-1) 오른쪽 셀 우선
+                for cc in range(c + 1, min(C, c + 5)):
+                    candidate = clean_candidate(arr[r][cc])
+                    if candidate:
+                        return candidate
+
+                # 2-2) 바로 아래 셀
+                for rr in range(r + 1, min(R, r + 4)):
+                    candidate = clean_candidate(arr[rr][c])
+                    if candidate:
+                        return candidate
+
+                # 2-3) 아래 오른쪽 대각선
+                for rr in range(r + 1, min(R, r + 4)):
+                    for cc in range(c + 1, min(C, c + 4)):
+                        candidate = clean_candidate(arr[rr][cc])
+                        if candidate:
+                            return candidate
+
+                # 2-4) 같은 행 전체 문자열에서 추출
+                row_text = " ".join([normalize_text(x) for x in arr[r].tolist() if normalize_text(x)])
+                candidate = clean_candidate(row_text)
+                if candidate:
+                    return candidate
+
+    # ------------------------------------------------------
+    # 3) 표 상단부 행 전체에서 보조 탐색
+    # ------------------------------------------------------
+    for df in dfs:
+        try:
+            arr = df.fillna("").astype(str).values
+        except Exception:
+            continue
+
+        for r in range(min(12, arr.shape[0])):
+            row_text = " ".join([normalize_text(x) for x in arr[r].tolist() if normalize_text(x)])
+            if "사채의 종류" in row_text or "사채종류" in row_text:
+                candidate = clean_candidate(row_text)
+                if candidate:
+                    return candidate
+
+    # ------------------------------------------------------
+    # 4) 마지막 fallback
+    # ------------------------------------------------------
     return bond_type_product_name(title)
 
 
