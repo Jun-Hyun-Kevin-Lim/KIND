@@ -1966,26 +1966,27 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
-# [주식연계채권][Put Option / Call Option]
-# 1순위: 섹션 제목부터 종료 문장까지 통으로 추출
-# 2순위: 정정사항 / 라벨값 추출
-# 3순위: 기존 키워드 기반 fallback 추출
-    put_val = scan_label_value_preferring_correction(
-        tables,
-        ["조기상환청구권", "Put Option", "풋옵션", "조기상환권", "사채권자의 조기상환청구권"],
-        corr_after
-    )
-    call_val = scan_label_value_preferring_correction(
-        tables,
-        ["매도청구권", "Call Option", "콜옵션", "중도상환청구권", "발행회사의 매도청구권"],
-        corr_after
-    )
+# ------------------------------------------------------
+# [주식연계채권][Put Option]
+# - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
+# - Put 종료 기준: "지급하여야 한다"
+# ------------------------------------------------------
+    put_section_val = extract_option_section_from_tables(tables, "put")
+    row["Put Option"] = put_section_val or extract_option_details_from_tables(tables, "put")
+
+# ------------------------------------------------------
+# [주식연계채권][Call Option]
+# - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
+# - Call 종료 기준: "매도하여야 한다"
+# ------------------------------------------------------
+    call_section_val = extract_option_section_from_tables(tables, "call")
+    row["Call Option"] = call_section_val or extract_option_details_from_tables(tables, "call")
     
     put_section_val = extract_option_section_from_tables(tables, "put")
     call_section_val = extract_option_section_from_tables(tables, "call")
     
-    row["Put Option"] = put_section_val or put_val or extract_option_details_from_tables(tables, "put")
-    row["Call Option"] = call_section_val or call_val or extract_option_details_from_tables(tables, "call")
+    row["Put Option"] = put_section_val or extract_option_details_from_tables(tables, "put")
+    row["Call Option"] = call_section_val or extract_option_details_from_tables(tables, "call")
 
     row["Call 비율"] = clean_percent(scan_label_value_preferring_correction(
         tables,
