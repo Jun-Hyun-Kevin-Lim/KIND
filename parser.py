@@ -1849,7 +1849,7 @@ def parse_bond_record(rec: Dict[str, Any]):
     call_section_val = extract_option_section_from_tables(tables, "call")
     
     row["Put Option"] = put_section_val or put_val or extract_option_details_from_tables(tables, "put")
-    row["Call Option"] = call_section_val or call_val or extract_option_details_from_tables(tables, "call")m_tables(tables, "call")
+    row["Call Option"] = call_section_val or call_val or extract_option_details_from_tables(tables, "call")
 
     row["Call 비율"] = clean_percent(scan_label_value_preferring_correction(
         tables,
