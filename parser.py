@@ -2193,11 +2193,8 @@ def parse_rights_record(rec: Dict[str, Any]):
     pre_shares = parse_float_like(row["증자전 주식수"])
 
     # 확정발행금액:
-    # 1순위 = 자금용도 표 금액 합계
-    # 2순위 = 신규발행주식수 * 확정발행가
-    if use_total is not None and use_total > 0:
-        row["확정발행금액(억원)"] = fmt_eok_from_won(use_total)
-    elif new_shares is not None and price_val is not None:
+    # 무조건 신규발행주식수 × 확정발행가(원) 기준으로 계산
+    if new_shares is not None and price_val is not None:
         row["확정발행금액(억원)"] = fmt_eok_from_won(new_shares * price_val)
 
     # 증자비율 계산
