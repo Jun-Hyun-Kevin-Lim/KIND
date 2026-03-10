@@ -2095,6 +2095,164 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
     return ratio, ytc
 
+# [정규식 패턴 중 가5장 먼저 나오는 매치 찾기]
+def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
+    best = None
+    for pat in patterns:
+        m = re.search(pat, text[start_pos:], flags=re.I)
+        if not m:
+            continue
+        abs_start = start_pos + m.start()
+        abs_end = start_pos + m.end()
+        if best is None or abs_start < best[0]:
+            best = (abs_start, abs_end, pat)
+    return best
+
+
+# [앵커 기준 옵션 블록 추출]
+# - put: "Put Option" / "풋옵션"이 보이는 지점부터 "Call Option" / "콜옵션" 직전까지
+# - call: "Call Option" / "콜옵션"이 보이는 지점부터 다음 큰 섹션 전까지
+# - 기존 로직을 대체하는 게 아니라 마지막 fallback용으로 추가
+def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type: str) -> str:
+    corpus = _option_corpus_from_tables(tables)
+    if not corpus:
+        return ""
+
+    corpus = _slice_option_major_section(corpus)
+    if not corpus:
+        return ""
+
+    if option_type == "put":
+        start_patterns = [
+            r"Put\s*Option",
+            r"PUT\s*OPTION",
+            r"풋옵션",
+        ]
+        stop_patterns = [
+            r"Call\s*Option",
+            r"CALL\s*OPTION",
+            r"콜옵션",
+        ]
+    else:
+        start_patterns = [
+            r"Call\s*Option",
+            r"CALL\s*OPTION",
+            r"콜옵션",
+        ]
+        stop_patterns = [
+            r"\n\s*\d+\s*-\s*\d+\s*\.",
+            r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
+            r"\n\s*[가-하]\.\s*[가-힣A-Za-z]",
+            r"\n\s*기타\s*투자판단에\s*참고할\s*사항",
+            r"\n\s*기타사항",
+            r"\n\s*합병\s*관련\s*사항",
+            r"\n\s*청약일",
+            r"\n\s*납입일",
+            r"\n\s*【",
+            r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
+        ]
+
+    start_hit = _find_first_regex_match(corpus, start_patterns)
+    if not start_hit:
+        return ""
+
+    # 매치 지점이 아니라 "그 줄의 시작"부터 가져오도록 보정
+    start_pos = corpus.rfind("\n", 0, start_hit[0]) + 1
+    sub = corpus[start_pos:]
+
+    # start 이후부터만 stop 찾기
+    local_anchor_pos = start_hit[0] - start_pos
+    search_from = min(len(sub), max(0, local_anchor_pos + 1))
+
+    end_pos = len(sub)
+    stop_hit = _find_first_regex_match(sub, stop_patterns, start_pos=search_from)
+
+    if stop_hit:
+        stop_line_start = sub.rfind("\n", 0, stop_hit[0])
+        if stop_line_start > 0:
+            end_pos = stop_line_start
+        else:
+            end_pos = stop_hit[0]
+
+    result = sub[:end_pos].strip()
+    result = _cleanup_option_result(result)
+
+    # 너무 짧으면 의미 없는 값으로 판단
+    if len(result) < 10:
+        return ""
+
+    return result
+
+
+# [옵션 후보 중 가장 좋은 값 선택]
+# - 기존 primary / 기존 fallback / 새 anchor fallback 중에서
+#   가장 본문성이 높은 값을 고른다
+def _score_option_text(text: str, option_type: str) -> int:
+    s = normalize_text(text)
+    if not s:
+        return -10**9
+
+    n = _norm(s)
+    score = min(len(s), 700)
+
+    noise_kws = [
+        "구분조기상환청구기간",
+        "구분매도청구권행사기간",
+        "fromto",
+        "시작일종료일",
+        "정정전",
+        "정정후",
+        "항목",
+        "변경사유",
+        "성명및관계",
+    ]
+    if any(k in n for k in noise_kws):
+        score -= 300
+
+    if option_type == "put":
+        if "putoption" in n or "풋옵션" in n:
+            score += 180
+        if "조기상환청구권" in n or "사채권자" in n or "조기상환" in n or "청구" in n:
+            score += 120
+        if ("calloption" in n or "콜옵션" in n) and not ("putoption" in n or "풋옵션" in n):
+            score -= 500
+
+    else:
+        if "calloption" in n or "콜옵션" in n:
+            score += 180
+        if "매도청구권" in n or "발행회사" in n or "지정하는자" in n or "매도" in n:
+            score += 120
+        if ("putoption" in n or "풋옵션" in n) and not ("calloption" in n or "콜옵션" in n):
+            score -= 500
+
+    if len(s) < 20:
+        score -= 150
+
+    return score
+
+
+def choose_best_option_value(option_type: str, *candidates: str) -> str:
+    best = ""
+    best_score = -10**9
+    seen = set()
+
+    for cand in candidates:
+        cleaned = _cleanup_option_result(cand)
+        cleaned = normalize_text(cleaned)
+        if not cleaned:
+            continue
+
+        dedup_key = _norm(cleaned)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        score = _score_option_text(cleaned, option_type)
+        if score > best_score:
+            best_score = score
+            best = cleaned
+
+    return best
 
 # [옵션 1차 추출]
 # - "원래 방식" 우선:
@@ -2631,11 +2789,23 @@ def parse_bond_record(rec: Dict[str, Any]):
 
     put_primary_val = extract_option_value_primary(tables, corr_after, "put")
     put_fallback_val = extract_option_section_from_tables(tables, "put") or extract_option_details_from_tables(tables, "put")
-    row["Put Option"] = first_nonempty(put_primary_val, put_fallback_val)
+    put_anchor_val = extract_option_block_by_anchor_range(tables, "put")
+    row["Put Option"] = choose_best_option_value(
+        "put",
+        put_primary_val,
+        put_fallback_val,
+        put_anchor_val,
+    )
 
     call_primary_val = extract_option_value_primary(tables, corr_after, "call")
     call_fallback_val = extract_option_section_from_tables(tables, "call") or extract_option_details_from_tables(tables, "call")
-    row["Call Option"] = first_nonempty(call_primary_val, call_fallback_val)
+    call_anchor_val = extract_option_block_by_anchor_range(tables, "call")
+    row["Call Option"] = choose_best_option_value(
+        "call",
+        call_primary_val,
+        call_fallback_val,
+        call_anchor_val,
+    )
 
     row["Call 비율"] = clean_percent(scan_label_value_preferring_correction(
         tables,
