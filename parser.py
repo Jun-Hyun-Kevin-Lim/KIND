@@ -939,72 +939,115 @@ def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> 
 # - 기준주가 / 기준발행가액 섹션만 정밀하게 읽음
 # - 확정발행가나 날짜 숫자가 섞여 들어오는 문제를 최대한 방지
 def get_base_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Optional[int]:
-    target_kws = ["기준주가", "기준발행가액"]
-    stop_kws = ["자금", "증자방식", "할인", "할증", "증자전", "납입", "방법", "산정", "일정", "신주발행가", "확정발행가", "예정발행가", "발행목적"]
+    """
+    기준주가는 반드시 '7. 기준주가' 섹션에서만 추출한다.
+    - 정정공시는 corr_after에서 '7. 기준주가' 항목 우선
+    - 일반 공시는 실제 표에서 '7. 기준주가' 섹션 블록만 읽음
+    - 다른 라벨(기준발행가액 등)에서 넓게 찾지 않음
+    """
 
+    def _extract_valid_prices(text: str) -> List[int]:
+        if not text:
+            return []
+
+        txt = str(text)
+        txt = re.sub(r'202\d[년월일\.]?', '', txt)         # 연도 제거
+        txt = re.sub(r'\d+(?:\.\d+)?%', '', txt)           # 퍼센트 제거
+        txt = re.sub(r'^([①-⑩]|\(\d+\)|\d+\.)+', '', txt)  # 앞 번호 제거
+
+        nums = re.findall(
+            r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])",
+            txt
+        )
+
+        vals = []
+        for x in nums:
+            try:
+                val = int(float(x.replace(",", "")))
+                if val >= 50 and val not in [2024, 2025, 2026, 2027]:
+                    vals.append(val)
+            except Exception:
+                pass
+        return vals
+
+    def _first_nonempty_cell(row_vals) -> str:
+        for x in row_vals:
+            s = normalize_text(x)
+            if s:
+                return s
+        return ""
+
+    def _is_section7_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        n = _norm(raw)
+        if not raw:
+            return False
+
+        patterns = [
+            r"^7[\.\)]?기준주가$",
+            r"^7[\.\)]?기준발행가액$",
+        ]
+        if any(re.match(p, n) for p in patterns):
+            return True
+
+        if "7기준주가" in n or "7기준발행가액" in n:
+            return True
+
+        return False
+
+    def _is_new_top_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+        return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
+
+    # ------------------------------------------------------
+    # 1순위: 정정공시 corr_after 에서 '7. 기준주가' 직접 탐색
+    # ------------------------------------------------------
     if corr_after:
         for k, v in corr_after.items():
-            k_norm = _norm(k)
-            if any(t in k_norm for t in target_kws) and not any(s in k_norm for s in stop_kws):
-                if "신주" in k_norm and "기준" not in k_norm:
-                    continue
-                v_clean = re.sub(r'202\d[년월일\.]?', '', v)
-                v_clean = re.sub(r'\d+(?:\.\d+)?%', '', v_clean)
-                nums = re.findall(r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])", v_clean)
-                all_vals = []
-                for x in nums:
-                    try:
-                        val = int(float(x.replace(',', '')))
-                        if val >= 50 and val not in [2024, 2025, 2026, 2027]:
-                            all_vals.append(val)
-                    except Exception:
-                        pass
-                if all_vals:
-                    return max(all_vals)
+            k_raw = normalize_text(k)
+            k_norm = _norm(k_raw)
 
+            if _is_section7_heading(k_raw) or "7기준주가" in k_norm or "7기준발행가액" in k_norm:
+                vals = _extract_valid_prices(v)
+                if vals:
+                    return max(vals)
+
+    # ------------------------------------------------------
+    # 2순위: 실제 테이블에서 '7. 기준주가' 섹션 블록 추출
+    # ------------------------------------------------------
     for df in dfs:
         try:
             arr = df.astype(str).values
         except Exception:
             continue
+
         R, C = arr.shape
+
         for r in range(R):
-            row_str_norm = _norm("".join(arr[r]))
-            if any(t in row_str_norm for t in target_kws):
-                if "신주" in row_str_norm and "기준" not in row_str_norm:
-                    continue
-                if any(s in row_str_norm for s in stop_kws) and not any(t in row_str_norm for t in target_kws):
-                    continue
+            row_list = arr[r].tolist()
+            first_cell = _first_nonempty_cell(row_list)
+            row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
 
-                all_nums = []
-                for rr in range(r, min(r + 4, R)):
-                    curr_row_norm = _norm("".join(arr[rr]))
-                    if rr > r:
-                        clean_next = _clean_label(curr_row_norm)
-                        if len(curr_row_norm) != len(clean_next):
-                            break
-                        if any(s in curr_row_norm for s in stop_kws):
-                            break
+            if _is_section7_heading(first_cell) or _is_section7_heading(row_join):
+                block_texts = []
 
-                    for c in range(C):
-                        cell_norm = _norm(arr[rr][c])
-                        if any(s in cell_norm for s in stop_kws) and not any(t in cell_norm for t in target_kws):
-                            continue
+                for rr in range(r, min(r + 6, R)):
+                    next_row_list = arr[rr].tolist()
+                    next_first = _first_nonempty_cell(next_row_list)
+                    next_join = " ".join([normalize_text(x) for x in next_row_list if normalize_text(x)])
 
-                        cell_clean = re.sub(r'202\d[년월일\.]?', '', cell_norm)
-                        cell_clean = re.sub(r'\d+(?:\.\d+)?%', '', cell_clean)
-                        cell_clean = re.sub(r'^([①-⑩]|\(\d+\)|\d+\.)+', '', cell_clean)
+                    # 시작 행 이후 새 대항목 나오면 중단
+                    if rr > r and _is_new_top_heading(next_first):
+                        break
 
-                        nums = re.findall(r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])", cell_clean)
-                        for x in nums:
-                            try:
-                                val = int(float(x.replace(",", "")))
-                                if val >= 50 and val not in [2024, 2025, 2026, 2027]:
-                                    all_nums.append(val)
-                            except Exception:
-                                pass
-                if all_nums:
-                    return max(all_nums)
+                    block_texts.append(next_join)
+
+                vals = _extract_valid_prices(" ".join(block_texts))
+                if vals:
+                    return max(vals)
+
     return None
 
 
@@ -2119,10 +2162,6 @@ def parse_rights_record(rec: Dict[str, Any]):
 
     # 기준주가
     base_price = get_base_price_by_exact_section(tables, corr_after)
-    if not base_price:
-        base_price = _max_int_in_text(scan_label_value_preferring_correction(
-            tables, ["기준주가", "기준발행가액"], corr_after
-        )) or find_row_best_int(tables, ["기준주가", "보통주식"], 50) or find_row_best_int(tables, ["기준주가"], 50)
     if base_price and base_price > 50:
         row["기준주가"] = fmt_number(base_price)
 
