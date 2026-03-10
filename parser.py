@@ -2795,23 +2795,21 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
-    put_primary_val = extract_option_value_primary(tables, corr_after, "put")
     put_fallback_val = extract_option_section_from_tables(tables, "put") or extract_option_details_from_tables(tables, "put")
+    put_primary_val = extract_option_value_primary(tables, corr_after, "put")
     put_anchor_val = extract_option_block_by_anchor_range(tables, "put")
-    row["Put Option"] = choose_best_option_value(
-        "put",
-        put_primary_val,
+    row["Put Option"] = first_nonempty(
         put_fallback_val,
+        put_primary_val,
         put_anchor_val,
     )
     
-    call_primary_val = extract_option_value_primary(tables, corr_after, "call")
     call_fallback_val = extract_option_section_from_tables(tables, "call") or extract_option_details_from_tables(tables, "call")
+    call_primary_val = extract_option_value_primary(tables, corr_after, "call")
     call_anchor_val = extract_option_block_by_anchor_range(tables, "call")
-    row["Call Option"] = choose_best_option_value(
-        "call",
-        call_primary_val,
+    row["Call Option"] = first_nonempty(
         call_fallback_val,
+        call_primary_val,
         call_anchor_val,
     )
 
