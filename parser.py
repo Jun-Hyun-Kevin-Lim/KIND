@@ -1344,6 +1344,7 @@ def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) 
 
     return _single_line(", ".join(final_investors[:15]))
 
+
 # ==========================================================
 # [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
 # - Put Option: 실제 본문 앵커 "본 사채의 사채권자는 ..."
@@ -1366,9 +1367,6 @@ def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
 
 
 def _slice_option_major_section(corpus: str) -> str:
-    """
-    가능하면 '9-1. 옵션에 관한 사항' 구간만 잘라서 탐색
-    """
     if not corpus:
         return ""
 
@@ -1378,7 +1376,6 @@ def _slice_option_major_section(corpus: str) -> str:
 
     sub = corpus[start_m.start():]
 
-    # 다음 큰 섹션 전까지만 자르기
     end_patterns = [
         r"\n\s*9\s*-\s*2\s*\.",
         r"\n\s*10\s*\.",
@@ -1408,18 +1405,10 @@ def _cleanup_option_result(text: str) -> str:
     if not text:
         return ""
 
-    # pipe / 표 헤더 노이즈 정리
     text = re.sub(r"\s*\|\s*", " ", text)
     text = re.sub(r"\(주\d+\)", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-
-    # 중복 헤더 앞부분 정리
-    text = re.sub(
-        r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?",
-        "",
-        text,
-        flags=re.I
-    ).strip()
+    text = re.sub(r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?", "", text, flags=re.I).strip()
 
     return text
 
@@ -1486,12 +1475,10 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
             start = m.start()
             tail = option_section[start:start + 4000]
 
-            # 헤더 직후 250자 안에 앵커가 있어야 "진짜 본문"으로 인정
             head_window = tail[:250]
             if not any(re.search(ap, head_window, flags=re.I) for ap in anchor_patterns):
                 continue
 
-            # 헤더 직후 노이즈 많으면 강한 패널티
             penalty = 0
             if any(re.search(bp, head_window, flags=re.I) for bp in bad_near_patterns):
                 penalty += 150
@@ -1502,11 +1489,8 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
 
             candidate = tail[:end_pos]
             score = 1000
-
-            # 너무 긴 경우 감점
             score -= max(0, len(candidate) - 800) // 5
 
-            # 표성 텍스트 많으면 감점
             if re.search(r"구분\s*조기상환\s*청구기간", candidate, flags=re.I):
                 score -= 300
             if re.search(r"구분\s*매도청구권\s*행사기간", candidate, flags=re.I):
@@ -1526,59 +1510,6 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
     best = candidates[0][1]
     return _cleanup_option_result(best)
 
-
-def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
-    corpus = _option_corpus_from_tables(tables)
-    if not corpus:
-        return ""
-
-    if option_type == "put":
-        start_patterns = [
-            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"사채권자의\s*조기상환청구권.*?에\s*관한\s*사항",
-        ]
-        fallback_keywords = ["조기상환청구권", "Put Option", "풋옵션"]
-        end_markers = ["지급하여야 한다", "지급하여야 합니다", "지급하여야한다"]
-    else:
-        start_patterns = [
-            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"발행회사의\s*매도청구권.*?에\s*관한\s*사항",
-        ]
-        fallback_keywords = ["매도청구권", "Call Option", "콜옵션"]
-        end_markers = ["매도하여야 한다", "매도하여야 합니다", "매도하여야한다"]
-
-    # 1차: 정확한 섹션 헤더부터 찾기
-    start_idx = -1
-    for pat in start_patterns:
-        m = re.search(pat, corpus, flags=re.IGNORECASE)
-        if m:
-            start_idx = m.start()
-            break
-
-    # 2차: "9-1. 옵션에 관한 사항" 안에서 키워드로 찾기
-    if start_idx == -1:
-        sec = re.search(r"9\s*-\s*1\s*\.\s*옵션에\s*관한\s*사항", corpus, flags=re.IGNORECASE)
-        if sec:
-            sub = corpus[sec.start():]
-            fallback_pos = []
-            for kw in fallback_keywords:
-                idx = sub.lower().find(kw.lower())
-                if idx != -1:
-                    fallback_pos.append(sec.start() + idx)
-            if fallback_pos:
-                start_idx = min(fallback_pos)
-
-    if start_idx == -1:
-        return ""
-
-    result = corpus[start_idx:]
-    result = _cut_option_text(result, end_markers)
-
-    return result
 
 def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
     if option_type == "put":
@@ -1966,26 +1897,20 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
-# ------------------------------------------------------
-# [주식연계채권][Put Option]
-# - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
-# - Put 종료 기준: "지급하여야 한다"
-# ------------------------------------------------------
+    # ------------------------------------------------------
+    # [주식연계채권][Put Option]
+    # - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
+    # - Put 종료 기준: "지급하여야 한다"
+    # ------------------------------------------------------
     put_section_val = extract_option_section_from_tables(tables, "put")
     row["Put Option"] = put_section_val or extract_option_details_from_tables(tables, "put")
 
-# ------------------------------------------------------
-# [주식연계채권][Call Option]
-# - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
-# - Call 종료 기준: "매도하여야 한다"
-# ------------------------------------------------------
+    # ------------------------------------------------------
+    # [주식연계채권][Call Option]
+    # - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
+    # - Call 종료 기준: "매도하여야 한다"
+    # ------------------------------------------------------
     call_section_val = extract_option_section_from_tables(tables, "call")
-    row["Call Option"] = call_section_val or extract_option_details_from_tables(tables, "call")
-    
-    put_section_val = extract_option_section_from_tables(tables, "put")
-    call_section_val = extract_option_section_from_tables(tables, "call")
-    
-    row["Put Option"] = put_section_val or extract_option_details_from_tables(tables, "put")
     row["Call Option"] = call_section_val or extract_option_details_from_tables(tables, "call")
 
     row["Call 비율"] = clean_percent(scan_label_value_preferring_correction(
