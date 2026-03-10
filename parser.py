@@ -23,7 +23,7 @@ GOOGLE_CREDENTIALS_JSON = (
 RAW_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_dump")
 RIGHTS_SHEET_NAME = os.getenv("RIGHTS_SHEET_NAME", "유상증자")
 BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "주식연계채권")
-PARSE_LOG_SHEET_NAME = os.getenv("PARSE_LOG_SHEET_NAME", "오류로그")
+PARSE_LOG_SHEET_NAME = os.getenv("PARSE_LOG_SHEET_NAME", "parse_log")
 
 RUN_ONLY_ACPTNO = os.getenv("RUN_ONLY_ACPTNO", "").strip()
 
