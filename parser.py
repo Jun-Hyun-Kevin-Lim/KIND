@@ -10,6 +10,9 @@ import pandas as pd
 
 # ==========================================================
 # [환경변수 / 시트명 설정]
+# - Google Sheets 접속용 ID / Credentials 로드
+# - RAW / 유상증자 / 주식연계채권 / parse_log 시트명 설정
+# - 특정 접수번호만 테스트할 때 RUN_ONLY_ACPTNO 사용
 # ==========================================================
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
 GOOGLE_CREDENTIALS_JSON = (
@@ -27,6 +30,8 @@ RUN_ONLY_ACPTNO = os.getenv("RUN_ONLY_ACPTNO", "").strip()
 
 # ==========================================================
 # [유상증자 시트 헤더]
+# - 최종 구조화 시트에 들어갈 컬럼 순서
+# - upsert 시 반드시 이 순서대로 들어감
 # ==========================================================
 RIGHTS_HEADERS = [
     "회사명", "보고서명", "상장시장", "최초 이사회결의일", "증자방식", "발행상품",
@@ -37,6 +42,8 @@ RIGHTS_HEADERS = [
 
 # ==========================================================
 # [주식연계채권 시트 헤더]
+# - CB / EB / BW 공통 컬럼 구조
+# - Put / Call / 리픽싱 / 행사조건 등을 포함
 # ==========================================================
 BOND_HEADERS = [
     "구분", "회사명", "보고서명", "상장시장", "최초 이사회결의일", "권면총액(원)",
@@ -48,6 +55,8 @@ BOND_HEADERS = [
 
 # ==========================================================
 # [파싱 로그 시트 헤더]
+# - 어떤 접수번호가 어떤 시트로 갔는지
+# - 누락 컬럼 / 의심 컬럼 / 처리 상태 기록용
 # ==========================================================
 PARSE_LOG_HEADERS = [
     "접수번호", "보고서명", "대상시트", "상태", "누락컬럼", "의심컬럼", "처리시각"
@@ -57,6 +66,9 @@ PARSE_LOG_HEADERS = [
 # ==========================================================
 # Google Sheets
 # ==========================================================
+# [구글시트 열기]
+# - 서비스 계정 credentials로 Google Sheet open
+# - 환경변수가 없으면 바로 에러 발생
 def gs_open():
     if not GOOGLE_SHEET_ID or not GOOGLE_CREDENTIALS_JSON:
         raise RuntimeError("GOOGLE_SHEET_ID / GOOGLE_CREDS(또는 GOOGLE_CREDENTIALS_JSON)가 비어있습니다.")
@@ -67,6 +79,9 @@ def gs_open():
     return sh
 
 
+# [워크시트 보장]
+# - 시트가 이미 있으면 가져오고
+# - 없으면 새로 생성
 def ensure_ws(sh, title: str, rows: int = 2000, cols: int = 60):
     try:
         return sh.worksheet(title)
@@ -74,6 +89,9 @@ def ensure_ws(sh, title: str, rows: int = 2000, cols: int = 60):
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 
+# [헤더 보장]
+# - 1행 헤더가 다르면 시트를 clear 후 새 헤더 입력
+# - 구조가 달라졌을 때 맞춰주는 용도
 def ensure_header(ws, headers: List[str]):
     current = ws.row_values(1)
     if current != headers:
@@ -81,6 +99,8 @@ def ensure_header(ws, headers: List[str]):
         ws.update("A1", [headers])
 
 
+# [안전한 셀 접근]
+# - row 길이보다 큰 index 요청 시 에러 대신 "" 반환
 def safe_cell(row: List[str], idx: int) -> str:
     return row[idx] if idx < len(row) else ""
 
@@ -88,6 +108,10 @@ def safe_cell(row: List[str], idx: int) -> str:
 # ==========================================================
 # RAW loader
 # ==========================================================
+# [RAW_dump 로더]
+# - RAW_dump에 쌓여있는 행들을 acpt_no 단위로 묶음
+# - META / HEADER / DATA 구조를 읽어 DataFrame 리스트로 재구성
+# - 최종적으로 rec = {acpt_no, title, src_url, tables...} 형태 반환
 def load_raw_records(raw_ws) -> List[Dict[str, Any]]:
     values = raw_ws.get_all_values()
     if not values:
@@ -108,17 +132,20 @@ def load_raw_records(raw_ws) -> List[Dict[str, Any]]:
         for row in rows:
             row_type = safe_cell(row, 2).strip()
 
+            # META 행: 공시 제목 / 링크 / 카테고리 등 저장
             if row_type == "META":
                 meta["category"] = safe_cell(row, 3)
                 meta["title"] = safe_cell(row, 4)
                 meta["src_url"] = safe_cell(row, 5)
                 meta["run_ts"] = safe_cell(row, 6)
 
+            # HEADER 행: table index별 컬럼 헤더 저장
             elif row_type == "HEADER":
                 tix = safe_cell(row, 1).strip()
                 table_buckets.setdefault(tix, {"header": [], "data": []})
                 table_buckets[tix]["header"] = row[3:]
 
+            # DATA 행: 실제 테이블 body 저장
             elif row_type == "DATA":
                 tix = safe_cell(row, 1).strip()
                 table_buckets.setdefault(tix, {"header": [], "data": []})
@@ -133,6 +160,7 @@ def load_raw_records(raw_ws) -> List[Dict[str, Any]]:
             if width == 0:
                 continue
 
+            # 열 개수 맞추기
             header = header + [f"col_{i}" for i in range(len(header), width)]
             norm_data = [r + [""] * (width - len(r)) for r in data]
             dfs.append(pd.DataFrame(norm_data, columns=header))
@@ -153,6 +181,9 @@ def load_raw_records(raw_ws) -> List[Dict[str, Any]]:
 # ==========================================================
 # Common utils
 # ==========================================================
+# [기본 문자열 정리]
+# - None 방지
+# - 줄바꿈/다중 공백 정리
 def normalize_text(x: Any) -> str:
     if x is None:
         return ""
@@ -161,22 +192,33 @@ def normalize_text(x: Any) -> str:
     return s.strip()
 
 
+# [강한 정규화]
+# - 공백 제거 + 콜론 제거
+# - label 비교용
 def _norm(s: Any) -> str:
     return re.sub(r"\s+", "", str(s or "")).replace(":", "")
 
 
+# [라벨 정리]
+# - ①, (1), 1. 같은 앞번호 제거
+# - 표 라벨 비교용
 def _clean_label(s: Any) -> str:
     return re.sub(r"^([①-⑩]|\(\d+\)|\d+\.)+", "", _norm(s))
 
 
+# [한 줄 문자열화]
 def _single_line(s: Any) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip()
 
 
+# [날짜 비교용 숫자화]
+# - 2025년 03월 10일 -> 20250310
 def _norm_date(s: Any) -> str:
     return re.sub(r"[^\d]", "", str(s or ""))
 
 
+# [날짜 포맷 통일]
+# - 다양한 날짜 표현을 "YYYY년 MM월 DD일" 형식으로 정리
 def _format_date(s: Any) -> str:
     txt = _single_line(s)
     m = re.search(r'(\d{4})[-년\./\s]+(\d{1,2})[-월\./\s]+(\d{1,2})', txt)
@@ -185,6 +227,8 @@ def _format_date(s: Any) -> str:
     return txt
 
 
+# [회사명 비교용 정규화]
+# - (주), 주식회사, ㈜ 제거 후 비교
 def norm_company_name(name: str) -> str:
     if not name:
         return ""
@@ -192,6 +236,7 @@ def norm_company_name(name: str) -> str:
     return _norm(n)
 
 
+# [첫 번째 비어있지 않은 값 반환]
 def first_nonempty(*vals):
     for v in vals:
         if normalize_text(v):
@@ -199,10 +244,13 @@ def first_nonempty(*vals):
     return ""
 
 
+# [키워드 포함 여부]
 def contains_any(text: str, keywords: List[str]) -> bool:
     return any(k in text for k in keywords)
 
 
+# [숫자형 문자열 -> float]
+# - %, 원, 콤마 등 제거 후 float 변환
 def parse_float_like(s):
     if s is None:
         return None
@@ -215,18 +263,21 @@ def parse_float_like(s):
         return None
 
 
+# [문자열 -> int]
 def parse_int(value: Any):
     s = normalize_text(value).replace(",", "")
     m = re.search(r"-?\d+", s)
     return int(m.group(0)) if m else None
 
 
+# [문자열 -> float]
 def parse_float(value: Any):
     s = normalize_text(value).replace(",", "")
     m = re.search(r"-?\d+(?:\.\d+)?", s)
     return float(m.group(0)) if m else None
 
 
+# [안전 int 변환]
 def _to_int(s: Any) -> Optional[int]:
     if s is None:
         return None
@@ -239,6 +290,7 @@ def _to_int(s: Any) -> Optional[int]:
         return None
 
 
+# [안전 float 변환]
 def _to_float(s: Any) -> Optional[float]:
     if s is None:
         return None
@@ -251,6 +303,9 @@ def _to_float(s: Any) -> Optional[float]:
         return None
 
 
+# [문장 안 최대 정수 찾기]
+# - 텍스트 안에 여러 숫자가 있을 때 가장 큰 숫자 반환
+# - 주식수 / 금액 추정에 자주 사용
 def _max_int_in_text(s: Any) -> Optional[int]:
     if not s:
         return None
@@ -264,6 +319,9 @@ def _max_int_in_text(s: Any) -> Optional[int]:
     return max(vals) if vals else None
 
 
+# [퍼센트 문자열 정리]
+# - 10 -> 10%
+# - 10.5 % -> 10.5%
 def clean_percent(value: str) -> str:
     s = normalize_text(value)
     if not s:
@@ -275,6 +333,9 @@ def clean_percent(value: str) -> str:
     return f"{m.group(0)}%" if m else s
 
 
+# [숫자 포맷팅]
+# - 정수는 1,234 형식
+# - 소수면 2자리까지
 def fmt_number(x):
     if x in (None, ""):
         return ""
@@ -287,21 +348,28 @@ def fmt_number(x):
     return f"{fx:,.2f}"
 
 
+# [원화 -> 억원]
 def fmt_eok_from_won(won):
     if won is None:
         return ""
     return f"{won / 100000000:.2f}"
 
 
+# [보고서명 정리]
+# - 자동복구 태그 제거
 def clean_title(title: str) -> str:
     return _single_line(title).replace("[자동복구대상]", "").strip()
 
 
+# [정정 공시 여부]
+# - 제목에 [정정] 또는 정정 포함 여부 판단
 def is_correction_title(title: str) -> bool:
     t = clean_title(title)
     return t.startswith("[정정]") or t.startswith("정정") or "[정정]" in t or "정정" in t
 
 
+# [시장 문자열 표준화]
+# - 다양한 표현을 코스닥 / 유가증권 / 코넥스 / 비상장으로 통일
 def normalize_market_value(value: Any) -> str:
     s = normalize_text(value)
     n = _norm(s)
@@ -333,10 +401,14 @@ def normalize_market_value(value: Any) -> str:
     return ""
 
 
+# [제목에서 시장 추정]
+# - [코] / [유] / [코넥스] 태그나 문구로 시장 인식
 def detect_market_from_title(title: str) -> str:
     return normalize_market_value(title)
 
 
+# [제목에서 공시 패밀리 인식]
+# - 유상증자 / CB / EB / BW 구분용
 def detect_report_family(title: str) -> str:
     for k in [
         "유상증자결정",
@@ -349,6 +421,8 @@ def detect_report_family(title: str) -> str:
     return ""
 
 
+# [제목에서 회사명 추출]
+# - [코] [정정] 등을 제거하고 앞부분 회사명 추출
 def extract_company_name_from_title(title: str) -> str:
     t = clean_title(title)
     t = re.sub(r"^\[(유|코|넥|코넥|KOSPI|KOSDAQ|KONEX)\]\s*", "", t).strip()
@@ -366,6 +440,8 @@ def extract_company_name_from_title(title: str) -> str:
     return parts[0].strip()
 
 
+# [유효한 날짜 문자열인지 판정]
+# - 날짜처럼 보이지만 사실 설명문인 것들을 제외
 def looks_like_valid_date(v: str) -> bool:
     v = _single_line(v)
     if not re.search(r"\d", v):
@@ -382,6 +458,8 @@ def looks_like_valid_date(v: str) -> bool:
     return True
 
 
+# [모든 테이블을 한 줄 텍스트 리스트로 변환]
+# - 옵션 본문 파싱 / 날짜 구간 파싱 등에 사용
 def all_text_lines(tables: List[pd.DataFrame]) -> List[str]:
     lines = []
     for df in tables:
@@ -393,6 +471,8 @@ def all_text_lines(tables: List[pd.DataFrame]) -> List[str]:
     return lines
 
 
+# [테이블 전체 텍스트 평탄화]
+# - 한 테이블의 모든 셀을 하나의 긴 문자열로 합침
 def flatten_table_text(table: pd.DataFrame) -> str:
     parts = []
     arr = table.fillna("").astype(str).values.tolist()
@@ -407,6 +487,9 @@ def flatten_table_text(table: pd.DataFrame) -> str:
 # ==========================================================
 # Pair helpers
 # ==========================================================
+# [2열 페어 추출]
+# - 행 내 인접 셀들을 (left, right) 쌍으로 저장
+# - 라벨-값 구조 탐색용
 def df_to_pairs(df: pd.DataFrame) -> List[Tuple[str, str]]:
     pairs = []
     arr = df.fillna("").astype(str).values.tolist()
@@ -422,6 +505,7 @@ def df_to_pairs(df: pd.DataFrame) -> List[Tuple[str, str]]:
     return pairs
 
 
+# [전체 테이블 페어 추출]
 def all_pairs_from_tables(tables: List[pd.DataFrame]) -> List[Tuple[str, str]]:
     out = []
     for df in tables:
@@ -429,6 +513,7 @@ def all_pairs_from_tables(tables: List[pd.DataFrame]) -> List[Tuple[str, str]]:
     return out
 
 
+# [왼쪽 라벨 키워드로 값 찾기]
 def find_value_by_left_keywords(pairs: List[Tuple[str, str]], keywords: List[str]) -> str:
     for left, right in pairs:
         if contains_any(left, keywords) and normalize_text(right):
@@ -436,6 +521,7 @@ def find_value_by_left_keywords(pairs: List[Tuple[str, str]], keywords: List[str
     return ""
 
 
+# [왼쪽 라벨 키워드로 숫자값 찾기]
 def find_numeric_value_by_keywords(pairs: List[Tuple[str, str]], keywords: List[str]):
     return parse_float(find_value_by_left_keywords(pairs, keywords))
 
@@ -443,6 +529,10 @@ def find_numeric_value_by_keywords(pairs: List[Tuple[str, str]], keywords: List[
 # ==========================================================
 # Table scanners
 # ==========================================================
+# [정정사항 표의 '정정후' 맵 추출]
+# - 정정 공시인 경우 '정정사항 / 정정전 / 정정후' 표를 우선 파싱
+# - item -> 정정후값 형태의 dict 생성
+# - 이후 실제 컬럼 추출 시 corr_after를 최우선으로 사용
 def extract_correction_after_map(dfs: List[pd.DataFrame]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for df in dfs:
@@ -488,6 +578,9 @@ def extract_correction_after_map(dfs: List[pd.DataFrame]) -> Dict[str, str]:
     return out
 
 
+# [라벨 주변 값 탐색]
+# - 표 안에서 label 후보를 찾고
+# - 오른쪽 / 아래 / 같은 행에서 실제 값을 찾아 반환
 def scan_label_value(dfs: List[pd.DataFrame], label_candidates: List[str]) -> str:
     cand_clean = {_clean_label(x) for x in label_candidates}
     for df in dfs:
@@ -515,6 +608,9 @@ def scan_label_value(dfs: List[pd.DataFrame], label_candidates: List[str]) -> st
     return ""
 
 
+# [라벨 값 탐색 - 정정후 우선]
+# - 정정 공시면 corr_after에서 먼저 찾고
+# - 없으면 일반 표 스캔으로 fallback
 def scan_label_value_preferring_correction(dfs: List[pd.DataFrame], label_candidates: List[str], corr_after: Dict[str, str]) -> str:
     cand_clean = {_clean_label(x) for x in label_candidates}
     if corr_after:
@@ -527,6 +623,8 @@ def scan_label_value_preferring_correction(dfs: List[pd.DataFrame], label_candid
     return scan_label_value(dfs, label_candidates)
 
 
+# [행 단위 최대 정수 탐색]
+# - 특정 키워드들이 포함된 행에서 숫자 후보 중 가장 적절한 큰 값 선택
 def find_row_best_int(dfs: List[pd.DataFrame], must_contain: List[str], min_val: int = 0) -> Optional[int]:
     keys = [_norm(x) for x in must_contain]
     best = None
@@ -551,6 +649,7 @@ def find_row_best_int(dfs: List[pd.DataFrame], must_contain: List[str], min_val:
     return best
 
 
+# [행 단위 float 탐색]
 def find_row_best_float(dfs: List[pd.DataFrame], must_contain: List[str]) -> Optional[float]:
     keys = [_norm(x) for x in must_contain]
     for df in dfs:
@@ -568,6 +667,9 @@ def find_row_best_float(dfs: List[pd.DataFrame], must_contain: List[str]) -> Opt
     return None
 
 
+# [라벨 기반 날짜 추출]
+# - 정정후 값 우선
+# - 표 내 라벨 주변에서 유효한 날짜 찾아 포맷팅
 def get_valid_date_by_labels(dfs: List[pd.DataFrame], labels: List[str], corr_after: Optional[Dict[str, str]] = None) -> str:
     cand_clean = {_clean_label(x) for x in labels}
 
@@ -604,6 +706,7 @@ def get_valid_date_by_labels(dfs: List[pd.DataFrame], labels: List[str], corr_af
     return ""
 
 
+# [테이블에서 시장 인식]
 def detect_market_from_tables(dfs: List[pd.DataFrame], corr_after: Optional[Dict[str, str]] = None) -> str:
     market_labels = [
         "상장시장", "시장구분", "주권상장구분", "상장구분",
@@ -611,6 +714,7 @@ def detect_market_from_tables(dfs: List[pd.DataFrame], corr_after: Optional[Dict
     ]
     label_set = {_clean_label(x) for x in market_labels}
 
+    # 1순위: 정정공시 값 우선
     if corr_after:
         for k, v in corr_after.items():
             k_clean = _clean_label(k)
@@ -621,6 +725,7 @@ def detect_market_from_tables(dfs: List[pd.DataFrame], corr_after: Optional[Dict
                 if market:
                     return market
 
+    # 2순위: 실제 표에서 라벨 주변 탐색
     for df in dfs:
         try:
             arr = df.fillna("").astype(str).values
@@ -661,6 +766,7 @@ def detect_market_from_tables(dfs: List[pd.DataFrame], corr_after: Optional[Dict
                     if market:
                         return market
 
+    # 3순위: 표 전체 텍스트 보조 탐색
     for line in all_text_lines(dfs):
         line_norm = _norm(line)
         if any(_norm(lb) in line_norm for lb in market_labels):
@@ -671,6 +777,9 @@ def detect_market_from_tables(dfs: List[pd.DataFrame], corr_after: Optional[Dict
     return ""
 
 
+# [테이블에서 회사명 인식]
+# - 회사명 관련 라벨을 우선 탐색
+# - 너무 긴 문장 / 비정상 텍스트는 제거
 def detect_company_from_tables(dfs: List[pd.DataFrame], corr_after: Optional[Dict[str, str]] = None) -> str:
     labels = ["회사명", "회사 명", "발행회사", "발행회사명", "법인명", "종속회사명", "종속회사", "종속회사인"]
     v = scan_label_value_preferring_correction(dfs, labels, corr_after or {})
@@ -686,6 +795,9 @@ def detect_company_from_tables(dfs: List[pd.DataFrame], corr_after: Optional[Dic
 # ==========================================================
 # Rights-specific helpers
 # ==========================================================
+# [주식수 텍스트 파서]
+# - 보통 / 기타(종류주) / 합계 숫자를 문장 안에서 분리 추출
+# - 신규발행주식수 / 증자전주식수 파싱에 공통 사용
 def parse_shares_from_text(text: str) -> Tuple[int, int, int]:
     text_norm = _norm(text)
     text_norm = re.sub(r'202\d[년월일\.]?', '', text_norm)
@@ -708,6 +820,7 @@ def parse_shares_from_text(text: str) -> Tuple[int, int, int]:
     tvs = [int(re.sub(r'[,.]', '', x)) for x in m_tot if int(re.sub(r'[,.]', '', x)) >= 50]
     tv = tvs[-1] if tvs else 0
 
+    # 위 패턴으로 못 잡은 경우 마지막 큰 숫자를 fallback으로 사용
     if cv == 0 and ov == 0 and tv == 0:
         text_clean = text_norm
         for kw in [
@@ -725,6 +838,9 @@ def parse_shares_from_text(text: str) -> Tuple[int, int, int]:
     return cv, ov, tv
 
 
+# [신규발행주식수 + 발행상품 추출]
+# - 신주의 종류와 수 / 발행예정주식수 근처를 읽어서
+# - 총 주식수와 발행상품(보통/우선/혼합) 추출
 def extract_issue_shares_and_type(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Tuple[Optional[int], str]:
     target_kws = ["신주의종류와수", "발행예정주식수", "발행예정주식", "신주발행", "발행할주식"]
     stop_kws = ["증자전", "기발행", "총수", "발행가", "액면가", "자금조달", "증자방식", "일정", "목적"]
@@ -732,6 +848,7 @@ def extract_issue_shares_and_type(dfs: List[pd.DataFrame], corr_after: Dict[str,
     stock_type = "보통주식"
     best_amt = 0
 
+    # 1순위: 정정후 값에서 먼저 찾기
     if corr_after:
         for k, v in corr_after.items():
             k_norm = _norm(k)
@@ -760,6 +877,7 @@ def extract_issue_shares_and_type(dfs: List[pd.DataFrame], corr_after: Dict[str,
                             stock_type = "보통주식, 우선주식" if "보통" in v_norm else "우선주식"
                         return best_amt, stock_type
 
+    # 2순위: 일반 테이블 블록 스캔
     for df in dfs:
         try:
             arr = df.astype(str).values
@@ -821,6 +939,7 @@ def extract_issue_shares_and_type(dfs: List[pd.DataFrame], corr_after: Dict[str,
                         stock_type = "보통주식, 우선주식" if "보통" in block_text else "우선주식"
                     return best_amt, stock_type
 
+    # 3순위: 단순 라벨 값 fallback
     val = scan_label_value(dfs, ["신주의 종류와 수", "발행예정주식", "발행예정주식수"])
     amt = _max_int_in_text(val)
     if amt and amt > 100:
@@ -830,6 +949,8 @@ def extract_issue_shares_and_type(dfs: List[pd.DataFrame], corr_after: Dict[str,
     return None, "보통주식"
 
 
+# [증자전 주식수 추출]
+# - '증자전발행주식총수' 계열 표를 읽어서 총 발행주식수 추출
 def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Optional[int]:
     target_kws = ["증자전발행주식총수", "기발행주식총수", "발행주식총수", "증자전주식수", "증자전"]
     stop_kws = ["신주의종류", "발행예정", "자금조달", "증자방식", "신주발행", "액면가", "발행가", "목적", "일정"]
@@ -898,7 +1019,17 @@ def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> 
     return None
 
 
+# [기준주가 추출]
+# - 기준주가 / 기준발행가액 섹션만 정밀하게 읽음
+# - 확정발행가나 날짜 숫자가 섞여 들어오는 문제를 최대한 방지
 def get_base_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Optional[int]:
+    """
+    기준주가는 반드시 '7. 기준주가' 섹션에서만 추출한다.
+    - 정정공시는 corr_after에서 '7. 기준주가' 항목 우선
+    - 일반 공시는 실제 표에서 '7. 기준주가' 섹션 블록만 읽음
+    - 다른 라벨(기준발행가액 등)에서 넓게 찾지 않음
+    """
+
     def _extract_valid_prices(text: str) -> List[int]:
         if not text:
             return []
@@ -997,6 +1128,10 @@ def get_base_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[st
     return None
 
 
+# [확정/예정 발행가 추출]
+# - 유상증자 공시에서 "6. 신주 발행가액" 섹션을 최우선으로 읽음
+# - 정정공시는 corr_after 우선
+# - 못 찾으면 기존 일반 발행가액 라벨로 fallback
 def get_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Optional[int]:
     target_kws = ["신주발행가액", "예정발행가액", "확정발행가액", "발행가액"]
     stop_kws = [
@@ -1143,6 +1278,9 @@ def get_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[str, st
     return None
 
 
+# [자금용도 + 자금합계 추출]
+# - 운영자금 / 채무상환자금 등 6개 카테고리 읽기
+# - 자금용도 텍스트와 합산 금액(won)을 함께 반환
 def extract_fund_use_and_amount(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Tuple[str, Optional[int]]:
     keys_map = {
         "시설자금": "시설자금",
@@ -1188,6 +1326,9 @@ def extract_fund_use_and_amount(dfs: List[pd.DataFrame], corr_after: Dict[str, s
     return ", ".join(uses), (total_sum if total_sum > 0 else None)
 
 
+# [유상증자 투자자 추출]
+# - 제3자배정대상자 / 배정대상자 / 법인명 컬럼 등에서 투자자명 추출
+# - 관계/합계/비고 같은 잡음을 blacklist로 제거
 def extract_investors_rights(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> str:
     investors = []
     blacklist = [
@@ -1275,6 +1416,8 @@ def extract_investors_rights(dfs: List[pd.DataFrame], corr_after: Dict[str, str]
 # ==========================================================
 # Bond-specific helpers
 # ==========================================================
+# [제목 기반 채권 구분 코드]
+# - CB / EB / BW 반환
 def bond_type_code(title: str) -> str:
     t = title.replace(" ", "")
     if "전환사채권발행결정" in t:
@@ -1286,6 +1429,8 @@ def bond_type_code(title: str) -> str:
     return ""
 
 
+# [제목 기반 발행상품명]
+# - 전환사채 / 교환사채 / 신주인수권부사채 반환
 def bond_type_product_name(title: str) -> str:
     t = title.replace(" ", "")
     if "전환사채권발행결정" in t:
@@ -1297,7 +1442,19 @@ def bond_type_product_name(title: str) -> str:
     return ""
 
 
+# [주식연계채권 발행상품 추출]
+# - "사채의 종류" 같은 표 라벨에서 실제 상품명 추출
+# - 못 찾으면 제목 기반 fallback
 def extract_product_type_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str], title: str) -> str:
+    """
+    주식연계채권 발행상품 추출
+    우선순위:
+    1) 정정공시의 corr_after에서 '1. 사채의 종류' 계열 값
+    2) 실제 표에서 '1. 사채의 종류' 라벨의 오른쪽 / 아래 값
+    3) 같은 행 전체 문자열에서 추출
+    4) 마지막 fallback으로 제목 기반 전환사채/교환사채/BW
+    """
+
     primary_labels = [
         "1. 사채의 종류",
         "1.사채의종류",
@@ -1425,6 +1582,8 @@ def extract_product_type_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str
     return bond_type_product_name(title)
 
 
+# [주식연계채권 납입일 추출]
+# - '납입일'이 있는 줄 주변에서 날짜 추출
 def extract_payment_date_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> str:
     if corr_after:
         for k, v in corr_after.items():
@@ -1458,6 +1617,9 @@ def extract_payment_date_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str
     return ""
 
 
+# [주식연계채권 자금용도 추출]
+# - 금액이 실제 있는 자금항목만 남김
+# - 타법인증권취득자금은 표준명으로 통일
 def extract_fund_usage_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> str:
     target_keys = ["시설자금", "영업양수자금", "운영자금", "채무상환자금", "타법인 증권 취득자금", "타법인증권취득자금", "기타자금"]
     for df in dfs:
@@ -1504,6 +1666,9 @@ def extract_fund_usage_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str])
     return _single_line(scan_label_value_preferring_correction(dfs, ["조달자금의 구체적 사용 목적", "자금용도"], corr_after))
 
 
+# [주식연계채권 투자자 추출]
+# - 대상자명 / 법인명 / 인수인 등에서 투자자 이름 수집
+# - 펀드명/조합명도 어느 정도 허용
 def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> str:
     investors = []
     blacklist = [
@@ -1613,7 +1778,11 @@ def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) 
 
 
 # ==========================================================
-# [Put / Call Option 정밀 추출 개선판]
+# [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
+# - Put Option: 실제 본문 앵커 "본 사채의 사채권자는 ..."
+# - Call Option: 실제 본문 앵커 "발행회사 또는 발행회사가 지정하는 자 ..."
+# - Put 종료: "지급하여야 한다"
+# - Call 종료: "매도하여야 한다"
 # ==========================================================
 def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
     lines = []
@@ -1629,23 +1798,14 @@ def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
     return corpus.strip()
 
 
+# [옵션 대섹션만 자르기]
+# - "9-1. 옵션에 관한 사항"부터 다음 큰 섹션 전까지만 사용
+# - Put/Call 외 다른 본문 혼입을 줄이기 위함
 def _slice_option_major_section(corpus: str) -> str:
     if not corpus:
         return ""
 
-    start_patterns = [
-        r"9\s*-\s*1\s*\.\s*옵션에\s*관한\s*사항",
-        r"9\s*-\s*1\s*옵션에\s*관한\s*사항",
-        r"옵션에\s*관한\s*사항",
-    ]
-
-    start_m = None
-    for pat in start_patterns:
-        m = re.search(pat, corpus, flags=re.I)
-        if m:
-            start_m = m
-            break
-
+    start_m = re.search(r"9\s*-\s*1\s*\.\s*옵션에\s*관한\s*사항", corpus, flags=re.I)
     if not start_m:
         return corpus
 
@@ -1654,7 +1814,6 @@ def _slice_option_major_section(corpus: str) -> str:
     end_patterns = [
         r"\n\s*9\s*-\s*2\s*\.",
         r"\n\s*10\s*\.",
-        r"\n\s*\d+\s*-\s*\d+\s*\.",
         r"\n\s*【",
         r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
     ]
@@ -1668,390 +1827,280 @@ def _slice_option_major_section(corpus: str) -> str:
     return sub[:end_idx].strip()
 
 
-def _cleanup_option_result(text: str, option_type: Optional[str] = None) -> str:
+# [종료 문구 위치 탐색]
+# - 여러 종료 패턴 중 가장 먼저 나오는 위치를 반환
+def _find_earliest_end(text: str, end_patterns: List[str]) -> int:
+    end_positions = []
+    for pat in end_patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            end_positions.append(m.end())
+    return min(end_positions) if end_positions else -1
+
+
+# [옵션 추출 결과 후처리]
+# - 파이프 구분자, 각주, 중복 공백 제거
+def _cleanup_option_result(text: str) -> str:
     if not text:
         return ""
 
-    s = str(text)
-    s = s.replace("\xa0", " ")
-    s = re.sub(r"\s*\|\s*", " ", s)
-    s = re.sub(r"\(주\d+\)", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = re.sub(r"\(주\d+\)", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?", "", text, flags=re.I).strip()
 
-    s = re.sub(r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?", "", s, flags=re.I).strip()
-
-    if option_type == "put":
-        put_header_pats = [
-            r"^\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
-            r"^\[\s*풋\s*옵션\s*에\s*관한\s*사항\s*\]\s*",
-            r"^\[\s*풋옵션\s*에\s*관한\s*사항\s*\]\s*",
-            r"^\[\s*Put\s*Option\s*에\s*관한\s*사항\s*\]\s*",
-            r"^조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*",
-            r"^조기상환청구권\s*에\s*관한\s*사항\s*",
-            r"^풋\s*옵션\s*에\s*관한\s*사항\s*",
-            r"^풋옵션\s*에\s*관한\s*사항\s*",
-        ]
-        for pat in put_header_pats:
-            s = re.sub(pat, "", s, flags=re.I).strip()
-    elif option_type == "call":
-        call_header_pats = [
-            r"^\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
-            r"^\[\s*콜\s*옵션\s*에\s*관한\s*사항\s*\]\s*",
-            r"^\[\s*콜옵션\s*에\s*관한\s*사항\s*\]\s*",
-            r"^\[\s*Call\s*Option\s*에\s*관한\s*사항\s*\]\s*",
-            r"^매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*",
-            r"^매도청구권\s*에\s*관한\s*사항\s*",
-            r"^콜\s*옵션\s*에\s*관한\s*사항\s*",
-            r"^콜옵션\s*에\s*관한\s*사항\s*",
-        ]
-        for pat in call_header_pats:
-            s = re.sub(pat, "", s, flags=re.I).strip()
-
-    return s
+    return text
 
 
-PUT_HEADER_PATTERNS = [
-    r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*풋\s*옵션\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*풋옵션\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*Put\s*Option\s*에\s*관한\s*사항\s*\]",
-    r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-    r"사채권자의\s*조기상환청구권.*?에\s*관한\s*사항",
-    r"조기상환청구권\s*에\s*관한\s*사항",
-    r"풋\s*옵션\s*에\s*관한\s*사항",
-    r"풋옵션\s*에\s*관한\s*사항",
-    r"Put\s*Option\s*에\s*관한\s*사항",
-]
-
-CALL_HEADER_PATTERNS = [
-    r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*콜\s*옵션\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*콜옵션\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*Call\s*Option\s*에\s*관한\s*사항\s*\]",
-    r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-    r"발행회사의\s*매도청구권.*?에\s*관한\s*사항",
-    r"매도청구권\s*에\s*관한\s*사항",
-    r"콜\s*옵션\s*에\s*관한\s*사항",
-    r"콜옵션\s*에\s*관한\s*사항",
-    r"Call\s*Option\s*에\s*관한\s*사항",
-]
-
-PUT_ANCHOR_PATTERNS = [
-    r"본\s*사채의\s*사채권자는",
-    r"사채권자는\s*본\s*사채의\s*발행일로부터",
-    r"사채권자는",
-    r"인수인은",
-    r"조기상환을\s*청구할\s*수\s*있",
-]
-
-CALL_ANCHOR_PATTERNS = [
-    r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
-    r"발행회사가\s*지정하는\s*자",
-    r"발행회사[는가]?",
-    r"매도청구권을\s*행사",
-    r"매도하여야\s*한다",
-]
-
-COMMON_OPTION_NOISE_PATTERNS = [
-    r"구분\s*조기상환\s*청구기간",
-    r"구분\s*매도청구권\s*행사기간",
-    r"From\s*To",
-    r"시작일\s*종료일",
-    r"기타\s*투자판단에\s*참고할\s*사항",
-    r"조기상환이율\s*지급방법",
-    r"조기상환청구기간",
-    r"매도청구권행사기간",
-]
-
-
-def _find_option_markers(text: str, use_headers: bool = True) -> List[Tuple[int, str]]:
-    markers = []
-    if use_headers:
-        for pat in PUT_HEADER_PATTERNS:
-            for m in re.finditer(pat, text, flags=re.I):
-                markers.append((m.start(), "put"))
-        for pat in CALL_HEADER_PATTERNS:
-            for m in re.finditer(pat, text, flags=re.I):
-                markers.append((m.start(), "call"))
-    else:
-        for pat in PUT_ANCHOR_PATTERNS:
-            for m in re.finditer(pat, text, flags=re.I):
-                markers.append((m.start(), "put"))
-        for pat in CALL_ANCHOR_PATTERNS:
-            for m in re.finditer(pat, text, flags=re.I):
-                markers.append((m.start(), "call"))
-
-    markers.sort(key=lambda x: x[0])
-
-    deduped = []
-    for pos, kind in markers:
-        if not deduped:
-            deduped.append((pos, kind))
-            continue
-        prev_pos, prev_kind = deduped[-1]
-        if kind == prev_kind and abs(pos - prev_pos) <= 20:
-            continue
-        deduped.append((pos, kind))
-
-    return deduped
-
-
-def _find_next_cut_pos(text: str, start_idx: int, option_type: str) -> int:
-    tail = text[start_idx:]
-    cut_positions = []
-
-    opposite_headers = CALL_HEADER_PATTERNS if option_type == "put" else PUT_HEADER_PATTERNS
-    for pat in opposite_headers:
-        m = re.search(pat, tail, flags=re.I)
-        if m and m.start() > 0:
-            cut_positions.append(m.start())
-
-    for pat in [
-        r"\n\s*\d+\s*\.\s*기타\s*투자판단에\s*참고할\s*사항",
-        r"\n\s*\d+\s*-\s*\d+\s*\.",
-        r"\n\s*10\s*\.",
-        r"\n\s*【",
-        r"금융위원회\s*/\s*한국거래소\s*귀중",
-    ]:
-        m = re.search(pat, tail, flags=re.I)
-        if m and m.start() > 0:
-            cut_positions.append(m.start())
-
-    if option_type == "put":
-        for pat in [r"지급하여야\s*한다\.?", r"지급하여야\s*합니다\.?", r"지급하여야한다\.?"]:
-            m = re.search(pat, tail, flags=re.I)
-            if m:
-                cut_positions.append(m.end())
-    else:
-        for pat in [r"매도하여야\s*한다\.?", r"매도하여야\s*합니다\.?", r"매도하여야한다\.?"]:
-            m = re.search(pat, tail, flags=re.I)
-            if m:
-                cut_positions.append(m.end())
-
-    if cut_positions:
-        return start_idx + min(cut_positions)
-
-    return len(text)
-
-
-def _option_has_real_body(text: str, option_type: str) -> bool:
-    s = normalize_text(text)
-    if not s:
-        return False
-
-    if option_type == "put":
-        musts = [
-            r"사채권자",
-            r"인수인",
-            r"투자자",
-            r"조기상환을\s*청구",
-            r"청구할\s*수\s*있",
-            r"지급하여야",
-        ]
-    else:
-        musts = [
-            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
-            r"발행회사가\s*지정하는\s*자",
-            r"발행회사",
-            r"매도청구권을\s*행사",
-            r"매수할\s*수\s*있",
-            r"매도하여야",
-        ]
-
-    hit_count = sum(1 for pat in musts if re.search(pat, s, flags=re.I))
-    return hit_count >= 2
-
-
-def _score_option_candidate(text: str, option_type: str) -> int:
-    s = normalize_text(text)
-    if not s:
-        return -10000
-
-    score = 0
-    s_norm = _norm(s)
-
-    if _option_has_real_body(s, option_type):
-        score += 500
-
-    if option_type == "put":
-        positive_pats = [
-            r"사채권자", r"인수인", r"투자자",
-            r"조기상환을\s*청구", r"청구할\s*수\s*있",
-            r"지급하여야", r"발행일로부터",
-        ]
-        opposite_pats = [
-            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
-            r"매도청구권을\s*행사",
-            r"매도하여야",
-        ]
-    else:
-        positive_pats = [
-            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
-            r"발행회사가\s*지정하는\s*자",
-            r"발행회사",
-            r"매도청구권을\s*행사",
-            r"매수할\s*수\s*있",
-            r"매도하여야",
-        ]
-        opposite_pats = [
-            r"사채권자", r"인수인", r"투자자",
-            r"조기상환을\s*청구", r"청구할\s*수\s*있",
-            r"지급하여야",
-        ]
-
-    for pat in positive_pats:
-        if re.search(pat, s, flags=re.I):
-            score += 60
-
-    for pat in opposite_pats:
-        if re.search(pat, s, flags=re.I):
-            score -= 45
-
-    for pat in COMMON_OPTION_NOISE_PATTERNS:
-        if re.search(pat, s, flags=re.I):
-            score -= 250
-
-    if re.match(r"^\d+\.\s*", s) and not _option_has_real_body(s, option_type):
-        score -= 180
-
-    if len(s) < 20:
-        score -= 250
-    elif len(s) < 40:
-        score -= 100
-    else:
-        score += min(len(s), 1200) // 8
-
-    if "기타투자판단에참고할사항" in s_norm:
-        score -= 400
-
-    if re.fullmatch(r"[\d,\.\-%\s]+", s):
-        score -= 500
-
-    return score
-
-
-def _split_option_blocks_by_markers(option_section: str, use_headers: bool = True) -> List[Tuple[str, str]]:
-    markers = _find_option_markers(option_section, use_headers=use_headers)
-    blocks = []
-    if not markers:
-        return blocks
-
-    for i, (start_pos, kind) in enumerate(markers):
-        next_pos = markers[i + 1][0] if i + 1 < len(markers) else len(option_section)
-        chunk = option_section[start_pos:next_pos].strip()
-
-        hard_cut = _find_next_cut_pos(chunk, 0, kind)
-        chunk = chunk[:hard_cut].strip()
-        chunk = _cleanup_option_result(chunk, kind)
-        if chunk:
-            blocks.append((kind, chunk))
-
-    return blocks
-
-
-def extract_option_boundary_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
-    corpus = _option_corpus_from_tables(tables)
-    if not corpus:
-        return ""
-
-    option_section = _slice_option_major_section(corpus)
-    candidates = []
-
-    for use_headers in [True, False]:
-        blocks = _split_option_blocks_by_markers(option_section, use_headers=use_headers)
-        for kind, chunk in blocks:
-            if kind != option_type:
-                continue
-            candidates.append(chunk)
-
-    if not candidates:
-        return ""
-
-    candidates = list(dict.fromkeys([normalize_text(x) for x in candidates if normalize_text(x)]))
-    if not candidates:
-        return ""
-
-    candidates.sort(key=lambda x: _score_option_candidate(x, option_type), reverse=True)
-    best = candidates[0]
-    return best if _score_option_candidate(best, option_type) > 0 else ""
-
-
+# [옵션 본문 섹션 통추출]
+# - Put/Call 섹션 제목부터 실제 종료문구까지 통째로 자름
+# - 표보다 '본문형 설명'을 최대한 살리기 위한 1순위 로직
 def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
     corpus = _option_corpus_from_tables(tables)
     if not corpus:
         return ""
 
     option_section = _slice_option_major_section(corpus)
-    blocks = _split_option_blocks_by_markers(option_section, use_headers=True)
-    if not blocks:
-        return ""
 
-    candidates = [chunk for kind, chunk in blocks if kind == option_type]
+    if option_type == "put":
+        header_patterns = [
+            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"사채권자의\s*조기상환청구권.*?에\s*관한\s*사항",
+        ]
+        anchor_patterns = [
+            r"본\s*사채의\s*사채권자는",
+            r"사채권자는\s*본\s*사채의\s*발행일로부터",
+            r"조기상환을\s*청구할\s*수\s*있",
+        ]
+        end_patterns = [
+            r"지급하여야\s*한다\.?",
+            r"지급하여야\s*합니다\.?",
+            r"지급하여야한다\.?",
+        ]
+        bad_near_patterns = [
+            r"\(주\d+\)",
+            r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)",
+            r"구분\s*조기상환\s*청구기간",
+            r"From\s*To",
+        ]
+    else:
+        header_patterns = [
+            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"발행회사의\s*매도청구권.*?에\s*관한\s*사항",
+        ]
+        anchor_patterns = [
+            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
+            r"발행회사[는가]?",
+            r"매도청구권을\s*행사",
+            r"매도하여야\s*한다",
+        ]
+        end_patterns = [
+            r"매도하여야\s*한다\.?",
+            r"매도하여야\s*합니다\.?",
+            r"매도하여야한다\.?",
+        ]
+        bad_near_patterns = [
+            r"\(주\d+\)",
+            r"구분\s*매도청구권\s*행사기간",
+            r"From\s*To",
+        ]
+
+    candidates = []
+
+    for pat in header_patterns:
+        for m in re.finditer(pat, option_section, flags=re.I):
+            start = m.start()
+            tail = option_section[start:start + 4000]
+
+            head_window = tail[:250]
+            if not any(re.search(ap, head_window, flags=re.I) for ap in anchor_patterns):
+                continue
+
+            penalty = 0
+            if any(re.search(bp, head_window, flags=re.I) for bp in bad_near_patterns):
+                penalty += 150
+
+            end_pos = _find_earliest_end(tail, end_patterns)
+            if end_pos == -1:
+                continue
+
+            candidate = tail[:end_pos]
+            score = 1000
+            score -= max(0, len(candidate) - 800) // 5
+
+            if re.search(r"구분\s*조기상환\s*청구기간", candidate, flags=re.I):
+                score -= 300
+            if re.search(r"구분\s*매도청구권\s*행사기간", candidate, flags=re.I):
+                score -= 300
+            if re.search(r"From\s*To", candidate, flags=re.I):
+                score -= 300
+            if re.search(r"\(주\d+\)", candidate, flags=re.I):
+                score -= 100
+
+            score -= penalty
+            candidates.append((score, candidate))
+
     if not candidates:
         return ""
 
-    candidates = list(dict.fromkeys([normalize_text(x) for x in candidates if normalize_text(x)]))
-    candidates.sort(key=lambda x: _score_option_candidate(x, option_type), reverse=True)
-    best = candidates[0]
-    return best if _score_option_candidate(best, option_type) > 0 else ""
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best = candidates[0][1]
+    return _cleanup_option_result(best)
 
 
+# [옵션 본문 상세 추출 fallback]
+# - 위 '섹션 통추출' 실패 시 보조적으로 사용하는 fallback
+# - 키워드 주변 window를 잡아서 본문성 있는 부분만 최대한 남김
 def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
+    if option_type == "put":
+        my_kws = ["조기상환청구권", "Put Option", "풋옵션", "조기상환권", "사채권자의 조기상환청구권"]
+        opp_kws = ["매도청구권", "Call Option", "콜옵션", "중도상환청구권"]
+        anchor_regex = r'(본\s*사채의\s*사채권자는|본\s*사채의\s*인수인은|사채권자는|인수인은|투자자는)'
+    else:
+        my_kws = ["매도청구권", "Call Option", "콜옵션", "중도상환청구권", "발행회사의 매도청구권"]
+        opp_kws = ["조기상환청구권", "Put Option", "풋옵션", "조기상환권"]
+        anchor_regex = r'(발행회사\s*또는\s*발행회사가\s*지정하는\s*자(?:\([^)]*\))?(?:는|가)?|발행회사(?:는|가)|회사는\s*만기\s*전|본\s*사채는\s*만기\s*전)'
+
     corpus = " ".join(all_text_lines(tables))
     corpus = normalize_text(corpus)
     if not corpus:
         return ""
 
-    if option_type == "put":
-        my_kws = ["조기상환청구권", "Put Option", "풋옵션", "풋 옵션"]
-        anchor_regex = r"(본\s*사채의\s*사채권자는|사채권자는|인수인은|투자자는)"
-        stop_pats = CALL_HEADER_PATTERNS + [
-            r"기타\s*투자판단에\s*참고할\s*사항",
-            r"매도청구권\s*행사기간",
-            r"콜\s*옵션",
-            r"콜옵션",
-        ]
-    else:
-        my_kws = ["매도청구권", "Call Option", "콜옵션", "콜 옵션"]
-        anchor_regex = r"(발행회사\s*또는\s*발행회사가\s*지정하는\s*자|발행회사가\s*지정하는\s*자|발행회사)"
-        stop_pats = PUT_HEADER_PATTERNS + [
-            r"기타\s*투자판단에\s*참고할\s*사항",
-            r"조기상환청구기간",
-            r"풋\s*옵션",
-            r"풋옵션",
-        ]
-
     candidates = []
     for kw in my_kws:
-        for m in re.finditer(re.escape(kw), corpus, re.I):
-            start = max(0, m.start() - 120)
-            end = min(len(corpus), m.start() + 1800)
-            window = corpus[start:end]
+        for m in re.finditer(re.escape(kw), corpus, re.IGNORECASE):
+            idx = m.start()
+            window = corpus[max(0, idx - 50): idx + 1200]
 
-            am = re.search(anchor_regex, window, re.I)
-            if am:
-                window = window[am.start():]
+            score = 0
+            if option_type == "put":
+                if re.search(r'사채권자|인수인|투자자', window):
+                    score += 50
+                if re.search(r'청구할\s*수\s*있다|조기상환을\s*청구', window):
+                    score += 50
+                if "의무보유" in window:
+                    score -= 200
+            else:
+                if re.search(r'발행회사|매수|매도청구', window):
+                    score += 50
+                if re.search(r'매수할\s*수\s*있다|매도를\s*청구', window):
+                    score += 50
+                if "의무보유" in window and "사채권자" in window:
+                    score -= 200
 
-            cut = len(window)
-            for pat in stop_pats:
-                sm = re.search(pat, window[20:], re.I)
-                if sm:
-                    cut = min(cut, 20 + sm.start())
+            if "매매일" in window and "상환율" in window:
+                score -= 300
+            if "from" in window.lower() and "to" in window.lower():
+                score -= 300
+            if "성명 및 관계" in window:
+                score -= 300
 
-            window = window[:cut].strip()
-            window = _cleanup_option_result(window, option_type)
-            if window:
-                candidates.append(window)
+            candidates.append((score, window))
 
     if not candidates:
         return ""
 
-    candidates = list(dict.fromkeys([normalize_text(x) for x in candidates if normalize_text(x)]))
-    candidates.sort(key=lambda x: _score_option_candidate(x, option_type), reverse=True)
-    best = candidates[0]
-    return best if _score_option_candidate(best, option_type) > 0 else ""
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_window = candidates[0]
+    if best_score < 0:
+        return ""
+
+    m = re.search(anchor_regex, best_window)
+    if m and m.start() < 150:
+        result = best_window[m.start():]
+    else:
+        result = best_window
+        for _ in range(3):
+            result = re.sub(r'^([\[【<\(]?\s*[①-⑩\d가-힣a-zA-Z][\.\)\]】>]\s*)+', '', result)
+            prefix_pattern = r'^(?:본\s*사채의\s*|발행회사의\s*)?(?:조기상환청구권|매도청구권|중도상환청구권|콜옵션|풋옵션|Put\s*Option|Call\s*Option|PUT\s*OPTION|CALL\s*OPTION)[^가-힣]*?(?:에\s*관한\s*사항|청구권자|행사|부여|비율|한도)?\s*[:\]\-\>]*\s*'
+            result = re.sub(prefix_pattern, '', result, flags=re.IGNORECASE)
+            result = re.sub(r'^[:\-\]\s]+', '', result)
+
+    stop_kws = opp_kws + [
+        "기타사항", "합병 관련 사항", "청약일", "납입일",
+        "기타 투자판단", "의무보유", "특정인", "발행결정 전후"
+    ]
+
+    cut_idx = len(result)
+    lower_result = result.lower()
+    for stop_kw in stop_kws:
+        s_idx = lower_result.find(stop_kw.lower())
+        if s_idx > 20 and s_idx < cut_idx:
+            cut_idx = s_idx
+
+    result = normalize_text(result[:cut_idx])
+
+    if len(result) < 5:
+        return ""
+
+    return result[:300] + ("..." if len(result) > 300 else "")
 
 
+# [Call Option 본문에서 Call 비율 / YTC 추출]
+# - 표 라벨에서 못 찾았을 때 Call Option 본문에서 % 값을 재추출
+# - 명시 패턴 우선, 없으면 퍼센트 후보를 heuristic으로 분류
+def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
+    text = normalize_text(text)
+    if not text:
+        return "", ""
+
+    ratio = ""
+    ytc = ""
+
+    percent_matches = re.findall(r"-?\d+(?:\.\d+)?\s*%", text)
+    percent_vals = []
+    for p in percent_matches:
+        val = parse_float_like(p)
+        if val is not None:
+            percent_vals.append((clean_percent(p), val))
+
+    explicit_ratio_patterns = [
+        r"(?:콜옵션\s*행사비율|매도청구권\s*행사비율|Call\s*비율|콜옵션\s*비율|매도청구권\s*비율|권면총액\s*대비\s*비율|행사비율)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
+        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:에\s*해당하는)?\s*(?:콜옵션|매도청구권)",
+    ]
+    for pat in explicit_ratio_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            ratio = f"{m.group(1)}%"
+            break
+
+    explicit_ytc_patterns = [
+        r"(?:YTC|Yield\s*To\s*Call|조기상환수익률|조기상환이율|연복리수익률)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
+        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:의\s*)?(?:조기상환수익률|연복리수익률|YTC)",
+    ]
+    for pat in explicit_ytc_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            ytc = f"{m.group(1)}%"
+            break
+
+    if not ratio:
+        for raw, val in percent_vals:
+            if 0 < val <= 100:
+                ratio = raw
+                break
+
+    if not ytc:
+        for raw, val in percent_vals:
+            if raw == ratio:
+                continue
+            if -50 <= val <= 50:
+                ytc = raw
+                break
+
+    return ratio, ytc
+
+
+# [옵션 1차 추출]
+# - "원래 방식" 우선:
+#   1) corr_after / 라벨-값 구조에서 직접 추출
+#   2) 표에서 해당 라벨 주변 값 추출
+# - 값이 없을 때만 섹션 본문 파싱으로 fallback 하도록 설계
 def extract_option_value_primary(
     dfs: List[pd.DataFrame],
     corr_after: Dict[str, str],
@@ -2065,10 +2114,11 @@ def extract_option_value_primary(
             "가. 조기상환청구권 (Put Option)에 관한 사항",
             "조기상환청구권에 관한 사항",
             "Put Option에 관한 사항",
-            "풋옵션에 관한 사항",
-            "풋 옵션에 관한 사항",
+            "조기상환청구권",
+            "Put Option",
+            "풋옵션",
         ]
-        opposite_markers = ["매도청구권", "Call Option", "콜옵션", "콜 옵션"]
+        opposite_markers = ["매도청구권", "Call Option", "콜옵션"]
     else:
         label_candidates = [
             "매도청구권(Call Option)에 관한 사항",
@@ -2077,10 +2127,11 @@ def extract_option_value_primary(
             "나. 매도청구권 (Call Option)에 관한 사항",
             "매도청구권에 관한 사항",
             "Call Option에 관한 사항",
-            "콜옵션에 관한 사항",
-            "콜 옵션에 관한 사항",
+            "매도청구권",
+            "Call Option",
+            "콜옵션",
         ]
-        opposite_markers = ["조기상환청구권", "Put Option", "풋옵션", "풋 옵션"]
+        opposite_markers = ["조기상환청구권", "Put Option", "풋옵션"]
 
     def _first_nonempty_cell(row_vals) -> str:
         for x in row_vals:
@@ -2089,13 +2140,84 @@ def extract_option_value_primary(
                 return s
         return ""
 
+    def _clean_option_text(text: str) -> str:
+        s = normalize_text(text)
+        if not s:
+            return ""
+
+        s = re.sub(r"^(가|나|다|라|마|바)\.\s*", "", s)
+
+        if option_type == "put":
+            s = re.sub(
+                r"^조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+            s = re.sub(
+                r"^조기상환청구권\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+        else:
+            s = re.sub(
+                r"^매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+            s = re.sub(
+                r"^매도청구권\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+
+        s = re.sub(r"\s*\|\s*", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
     def _looks_like_noise(text: str) -> bool:
-        if not text:
+        s = normalize_text(text)
+        if not s:
             return True
-        return _score_option_candidate(text, option_type) <= 0
+
+        s_norm = _norm(s)
+
+        if s in ("-", ".", ","):
+            return True
+
+        if re.fullmatch(r"[\d,\.\-%\s]+", s):
+            return True
+
+        noise_kws = [
+            "구분조기상환청구기간",
+            "구분매도청구권행사기간",
+            "fromto",
+            "시작일종료일",
+            "정정전",
+            "정정후",
+            "항목",
+            "변경사유",
+        ]
+        if any(k in s_norm for k in noise_kws):
+            return True
+
+        return False
+
+    def _is_new_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+
+        return (
+            bool(re.match(r"^(가|나|다|라|마|바)\.\s*", raw)) or
+            bool(re.match(r"^\d+\s*[\.\)]\s*", raw))
+        )
 
     direct = scan_label_value_preferring_correction(dfs, label_candidates, corr_after)
-    direct = _cleanup_option_result(direct, option_type)
+    direct = _clean_option_text(direct)
     if direct and not _looks_like_noise(direct):
         return direct
 
@@ -2103,7 +2225,7 @@ def extract_option_value_primary(
         for k, v in corr_after.items():
             k_norm = _norm(k)
             if any(_norm(lb) in k_norm for lb in label_candidates):
-                cleaned = _cleanup_option_result(v, option_type)
+                cleaned = _clean_option_text(v)
                 if cleaned and not _looks_like_noise(cleaned):
                     return cleaned
 
@@ -2124,7 +2246,7 @@ def extract_option_value_primary(
                 continue
 
             block_lines = []
-            for rr in range(r, min(r + 10, R)):
+            for rr in range(r, min(r + 8, R)):
                 next_row_vals = arr[rr].tolist()
                 next_row_join = " ".join([normalize_text(x) for x in next_row_vals if normalize_text(x)])
                 next_first = _first_nonempty_cell(next_row_vals)
@@ -2135,45 +2257,21 @@ def extract_option_value_primary(
                 if rr > r:
                     if any(k.lower() in next_row_join.lower() for k in opposite_markers):
                         break
-                    if re.match(r"^\d+\s*[\.\)]\s*", next_first):
-                        break
-                    if re.match(r"^(가|나|다|라|마|바)\.\s*", next_first):
+
+                    if _is_new_heading(next_first):
                         break
 
                 block_lines.append(next_row_join)
 
-            candidate = _cleanup_option_result(" ".join(block_lines), option_type)
+            candidate = _clean_option_text(" ".join(block_lines))
             if candidate and not _looks_like_noise(candidate):
                 return candidate
 
     return ""
 
 
-def choose_better_option_value(option_type: str, *candidates: str) -> str:
-    uniq = []
-    seen = set()
-    for c in candidates:
-        s = normalize_text(c)
-        if s and s not in seen:
-            uniq.append(s)
-            seen.add(s)
-
-    if not uniq:
-        return ""
-
-    scored = [(c, _score_option_candidate(c, option_type)) for c in uniq]
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    best_text, best_score = scored[0]
-    if best_score <= 0:
-        return first_nonempty(*uniq)
-
-    return best_text
-
-
-# ==========================================================
-# 기간형 날짜 추출
-# ==========================================================
+# [기간형 날짜 2개 추출]
+# - 전환청구기간 / 교환청구기간 / 권리행사기간 블록에서 시작일/종료일 추출
 def extract_period_dates_from_tables(
     tables: List[pd.DataFrame],
     corr_after: Dict[str, str],
@@ -2294,6 +2392,9 @@ def extract_period_dates_from_tables(
 # ==========================================================
 # Parsers
 # ==========================================================
+# [유상증자 레코드 파서]
+# - RAW record 하나를 RIGHTS_HEADERS 구조 row로 변환
+# - 누락 컬럼 / 의심 컬럼도 함께 반환
 def parse_rights_record(rec: Dict[str, Any]):
     title = clean_title(rec["title"])
     tables = rec["tables"]
@@ -2419,6 +2520,9 @@ def parse_rights_record(rec: Dict[str, Any]):
     return row, missing, suspicious
 
 
+# [주식연계채권 레코드 파서]
+# - RAW record 하나를 BOND_HEADERS 구조 row로 변환
+# - CB / EB / BW 공통 로직
 def parse_bond_record(rec: Dict[str, Any]):
     title = clean_title(rec["title"])
     tables = rec["tables"]
@@ -2512,6 +2616,7 @@ def parse_bond_record(rec: Dict[str, Any]):
         )
 
     period_keywords = []
+
     if row["구분"] == "CB":
         period_keywords = ["전환청구기간"]
     elif row["구분"] == "EB":
@@ -2525,28 +2630,12 @@ def parse_bond_record(rec: Dict[str, Any]):
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
     put_primary_val = extract_option_value_primary(tables, corr_after, "put")
-    put_boundary_val = extract_option_boundary_from_tables(tables, "put")
-    put_section_val = extract_option_section_from_tables(tables, "put")
-    put_detail_val = extract_option_details_from_tables(tables, "put")
-    row["Put Option"] = choose_better_option_value(
-        "put",
-        put_primary_val,
-        put_boundary_val,
-        put_section_val,
-        put_detail_val,
-    )
+    put_fallback_val = extract_option_section_from_tables(tables, "put") or extract_option_details_from_tables(tables, "put")
+    row["Put Option"] = first_nonempty(put_primary_val, put_fallback_val)
 
     call_primary_val = extract_option_value_primary(tables, corr_after, "call")
-    call_boundary_val = extract_option_boundary_from_tables(tables, "call")
-    call_section_val = extract_option_section_from_tables(tables, "call")
-    call_detail_val = extract_option_details_from_tables(tables, "call")
-    row["Call Option"] = choose_better_option_value(
-        "call",
-        call_primary_val,
-        call_boundary_val,
-        call_section_val,
-        call_detail_val,
-    )
+    call_fallback_val = extract_option_section_from_tables(tables, "call") or extract_option_details_from_tables(tables, "call")
+    row["Call Option"] = first_nonempty(call_primary_val, call_fallback_val)
 
     row["Call 비율"] = clean_percent(scan_label_value_preferring_correction(
         tables,
@@ -2582,10 +2671,6 @@ def parse_bond_record(rec: Dict[str, Any]):
         suspicious.append("회사명")
     if row["보고서명"] and len(row["보고서명"]) < 5:
         suspicious.append("보고서명")
-    if row["Put Option"] and _score_option_candidate(row["Put Option"], "put") <= 0:
-        suspicious.append("Put Option")
-    if row["Call Option"] and _score_option_candidate(row["Call Option"], "call") <= 0:
-        suspicious.append("Call Option")
 
     return row, missing, suspicious
 
@@ -2593,6 +2678,8 @@ def parse_bond_record(rec: Dict[str, Any]):
 # ==========================================================
 # Upsert helpers
 # ==========================================================
+# [특정 키 컬럼값으로 시트 행 찾기]
+# - 현재는 접수번호 기반 update 여부 판단에 사용
 def find_row_by_key(ws, key_header: str, key_value: str) -> Optional[int]:
     vals = ws.get_all_values()
     if not vals:
@@ -2609,6 +2696,12 @@ def find_row_by_key(ws, key_header: str, key_value: str) -> Optional[int]:
     return None
 
 
+# [이벤트 단위 기존 행 찾기]
+# - 접수번호가 달라도 같은 이벤트라고 판단되면 update 가능하도록 보조 탐색
+# - 기준:
+#   1) 회사명 정규화 동일
+#   2) 최초 이사회결의일 동일
+#   3) bond인 경우 구분(CB/EB/BW)도 동일
 def find_event_row(ws, headers: List[str], row_dict: Dict[str, Any], sheet_type: str) -> Optional[int]:
     vals = ws.get_all_values()
     if not vals or len(vals) <= 1:
@@ -2639,6 +2732,10 @@ def find_event_row(ws, headers: List[str], row_dict: Dict[str, Any], sheet_type:
     return None
 
 
+# [구조화 row upsert]
+# - 1순위: 접수번호로 기존 행 탐색
+# - 2순위: 동일 이벤트(회사명+최초이사회결의일, bond면 구분 포함) 탐색
+# - 있으면 UPDATE, 없으면 APPEND
 def upsert_structured_row(ws, headers: List[str], row_dict: Dict[str, Any], sheet_type: str):
     row_values = [row_dict.get(h, "") for h in headers]
     target_row = find_row_by_key(ws, "접수번호", str(row_dict.get("접수번호", "")))
@@ -2656,6 +2753,8 @@ def upsert_structured_row(ws, headers: List[str], row_dict: Dict[str, Any], shee
 # ==========================================================
 # Logging / Runner
 # ==========================================================
+# [parse_log 기록]
+# - 처리 상태 / 누락 컬럼 / 의심 컬럼을 parse_log 시트에 append
 def write_parse_log(
     log_ws,
     acpt_no: str,
@@ -2677,6 +2776,12 @@ def write_parse_log(
     ], value_input_option="RAW")
 
 
+# [메인 실행 함수]
+# - 시트 오픈 / 헤더 보장
+# - RAW_dump 레코드 로드
+# - 공시 타입별 parser 실행
+# - 결과를 rights / bond 시트에 upsert
+# - 처리 로그를 parse_log에 기록
 def run_parser():
     sh = gs_open()
 
@@ -2737,5 +2842,6 @@ def run_parser():
     print(f"[DONE] ok={ok} skip={skip} fail={fail}")
 
 
+# [직접 실행 진입점]
 if __name__ == "__main__":
     run_parser()
