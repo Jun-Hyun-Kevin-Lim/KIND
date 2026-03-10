@@ -2325,9 +2325,21 @@ def parse_bond_record(rec: Dict[str, Any]):
             get_corr_num(["최저 조정가액", "조정가액 하한", "최저조정가액", "리픽싱하한"], ["최저조정가액", "원"], 50)
         )
 
-    # 전환청구기간 / 교환청구기간 / 권리행사기간
+    # 전환청구 시작 / 종료
+    # - CB : 전환청구기간
+    # - EB : 교환청구기간
+    # - BW : 권리행사기간
+    period_keywords = []
+    
+    if row["구분"] == "CB":
+        period_keywords = ["전환청구기간"]
+    elif row["구분"] == "EB":
+        period_keywords = ["교환청구기간"]
+    elif row["구분"] == "BW":
+        period_keywords = ["권리행사기간"]
+    
     s_date, e_date = extract_period_dates_from_tables(
-        tables, corr_after, ["전환청구기간", "교환청구기간", "권리행사기간"]
+        tables, corr_after, period_keywords
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
