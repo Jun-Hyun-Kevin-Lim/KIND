@@ -2124,6 +2124,10 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
 
     if option_type == "put":
         start_patterns = [
+            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항",
+            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
             r"Put\s*Option",
             r"PUT\s*OPTION",
             r"풋옵션",
@@ -2135,6 +2139,10 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
         ]
     else:
         start_patterns = [
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항",
+            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
             r"Call\s*Option",
             r"CALL\s*OPTION",
             r"콜옵션",
@@ -2796,7 +2804,7 @@ def parse_bond_record(rec: Dict[str, Any]):
         put_fallback_val,
         put_anchor_val,
     )
-
+    
     call_primary_val = extract_option_value_primary(tables, corr_after, "call")
     call_fallback_val = extract_option_section_from_tables(tables, "call") or extract_option_details_from_tables(tables, "call")
     call_anchor_val = extract_option_block_by_anchor_range(tables, "call")
