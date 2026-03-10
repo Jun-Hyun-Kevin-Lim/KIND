@@ -42,8 +42,8 @@ GOOGLE_CREDENTIALS_JSON = (
     or os.environ.get("GOOGLE_CREDS", "").strip()
 )
 
-DUMP_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_dump")
-SEEN_SHEET_NAME = os.getenv("SEEN_SHEET_NAME", "seen")
+DUMP_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_DATA")
+SEEN_SHEET_NAME = os.getenv("SEEN_SHEET_NAME", "처리기록")
 
 OUTDIR = Path(os.getenv("OUTDIR", "out"))
 DEBUGDIR = OUTDIR / "debug"
