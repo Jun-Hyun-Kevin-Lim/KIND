@@ -2055,6 +2055,192 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
     return ratio, ytc
 
+# [옵션 1차 추출]
+# - "원래 방식" 우선:
+#   1) corr_after / 라벨-값 구조에서 직접 추출
+#   2) 표에서 해당 라벨 주변 값 추출
+# - 값이 없을 때만 섹션 본문 파싱으로 fallback 하도록 설계
+def extract_option_value_primary(
+    dfs: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+    option_type: str
+) -> str:
+    if option_type == "put":
+        label_candidates = [
+            "조기상환청구권(Put Option)에 관한 사항",
+            "조기상환청구권 (Put Option)에 관한 사항",
+            "가. 조기상환청구권(Put Option)에 관한 사항",
+            "가. 조기상환청구권 (Put Option)에 관한 사항",
+            "조기상환청구권에 관한 사항",
+            "Put Option에 관한 사항",
+            "조기상환청구권",
+            "Put Option",
+            "풋옵션",
+        ]
+        opposite_markers = ["매도청구권", "Call Option", "콜옵션"]
+    else:
+        label_candidates = [
+            "매도청구권(Call Option)에 관한 사항",
+            "매도청구권 (Call Option)에 관한 사항",
+            "나. 매도청구권(Call Option)에 관한 사항",
+            "나. 매도청구권 (Call Option)에 관한 사항",
+            "매도청구권에 관한 사항",
+            "Call Option에 관한 사항",
+            "매도청구권",
+            "Call Option",
+            "콜옵션",
+        ]
+        opposite_markers = ["조기상환청구권", "Put Option", "풋옵션"]
+
+    def _first_nonempty_cell(row_vals) -> str:
+        for x in row_vals:
+            s = normalize_text(x)
+            if s:
+                return s
+        return ""
+
+    def _clean_option_text(text: str) -> str:
+        s = normalize_text(text)
+        if not s:
+            return ""
+
+        # 가./나. 제거
+        s = re.sub(r"^(가|나|다|라|마|바)\.\s*", "", s)
+
+        # 제목 라벨 제거
+        if option_type == "put":
+            s = re.sub(
+                r"^조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+            s = re.sub(
+                r"^조기상환청구권\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+        else:
+            s = re.sub(
+                r"^매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+            s = re.sub(
+                r"^매도청구권\s*[:：]?\s*",
+                "",
+                s,
+                flags=re.I,
+            )
+
+        s = re.sub(r"\s*\|\s*", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _looks_like_noise(text: str) -> bool:
+        s = normalize_text(text)
+        if not s:
+            return True
+
+        s_norm = _norm(s)
+
+        if s in ("-", ".", ","):
+            return True
+
+        # 숫자만 있는 경우
+        if re.fullmatch(r"[\d,\.\-%\s]+", s):
+            return True
+
+        # 표 헤더/잡음
+        noise_kws = [
+            "구분조기상환청구기간",
+            "구분매도청구권행사기간",
+            "fromto",
+            "시작일종료일",
+            "정정전",
+            "정정후",
+            "항목",
+            "변경사유",
+        ]
+        if any(k in s_norm for k in noise_kws):
+            return True
+
+        return False
+
+    def _is_new_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+
+        return (
+            bool(re.match(r"^(가|나|다|라|마|바)\.\s*", raw)) or
+            bool(re.match(r"^\d+\s*[\.\)]\s*", raw))
+        )
+
+    # ------------------------------------------------------
+    # 1순위: corr_after / 라벨-값 구조 직접 추출
+    # ------------------------------------------------------
+    direct = scan_label_value_preferring_correction(dfs, label_candidates, corr_after)
+    direct = _clean_option_text(direct)
+    if direct and not _looks_like_noise(direct):
+        return direct
+
+    # corr_after key 자체가 옵션 제목일 수도 있으므로 별도 확인
+    if corr_after:
+        for k, v in corr_after.items():
+            k_norm = _norm(k)
+            if any(_norm(lb) in k_norm for lb in label_candidates):
+                cleaned = _clean_option_text(v)
+                if cleaned and not _looks_like_noise(cleaned):
+                    return cleaned
+
+    # ------------------------------------------------------
+    # 2순위: 표에서 옵션 제목 아래 블록 묶어서 추출
+    # ------------------------------------------------------
+    for df in dfs:
+        try:
+            arr = df.fillna("").astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
+
+        for r in range(R):
+            row_vals = arr[r].tolist()
+            row_join = " ".join([normalize_text(x) for x in row_vals if normalize_text(x)])
+            row_norm = _norm(row_join)
+
+            if not any(_norm(lb) in row_norm for lb in label_candidates):
+                continue
+
+            block_lines = []
+            for rr in range(r, min(r + 8, R)):
+                next_row_vals = arr[rr].tolist()
+                next_row_join = " ".join([normalize_text(x) for x in next_row_vals if normalize_text(x)])
+                next_first = _first_nonempty_cell(next_row_vals)
+
+                if not next_row_join:
+                    continue
+
+                if rr > r:
+                    # 반대 옵션 섹션 나오면 중단
+                    if any(k.lower() in next_row_join.lower() for k in opposite_markers):
+                        break
+
+                    # 새 소제목 나오면 중단
+                    if _is_new_heading(next_first):
+                        break
+
+                block_lines.append(next_row_join)
+
+            candidate = _clean_option_text(" ".join(block_lines))
+            if candidate and not _looks_like_noise(candidate):
+                return candidate
+
+    return ""
+
 # [기간형 날짜 2개 추출]
 # - 전환청구기간 / 교환청구기간 / 권리행사기간 블록에서 시작일/종료일 추출
 def extract_period_dates_from_tables(
@@ -2448,19 +2634,21 @@ def parse_bond_record(rec: Dict[str, Any]):
 
     # ------------------------------------------------------
     # [주식연계채권][Put Option]
-    # - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
-    # - Put 종료 기준: "지급하여야 한다"
+    # - 1순위: 원래 방식(라벨-값 / 표 주변값)
+    # - 2순위: "가. 조기상환청구권(Put Option)에 관한 사항" 섹션 본문 파싱
     # ------------------------------------------------------
-    put_section_val = extract_option_section_from_tables(tables, "put")
-    row["Put Option"] = put_section_val or extract_option_details_from_tables(tables, "put")
+    put_primary_val = extract_option_value_primary(tables, corr_after, "put")
+    put_fallback_val = extract_option_section_from_tables(tables, "put") or extract_option_details_from_tables(tables, "put")
+    row["Put Option"] = first_nonempty(put_primary_val, put_fallback_val)
 
     # ------------------------------------------------------
     # [주식연계채권][Call Option]
-    # - 1순위: 섹션 제목부터 종료문장까지 통으로 추출
-    # - Call 종료 기준: "매도하여야 한다"
+    # - 1순위: 원래 방식(라벨-값 / 표 주변값)
+    # - 2순위: "나. 매도청구권(Call Option)에 관한 사항" 섹션 본문 파싱
     # ------------------------------------------------------
-    call_section_val = extract_option_section_from_tables(tables, "call")
-    row["Call Option"] = call_section_val or extract_option_details_from_tables(tables, "call")
+    call_primary_val = extract_option_value_primary(tables, corr_after, "call")
+    call_fallback_val = extract_option_section_from_tables(tables, "call") or extract_option_details_from_tables(tables, "call")
+    row["Call Option"] = first_nonempty(call_primary_val, call_fallback_val)
 
     # Call 비율 / YTC는 표 라벨 우선
     row["Call 비율"] = clean_percent(scan_label_value_preferring_correction(
