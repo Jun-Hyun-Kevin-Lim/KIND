@@ -1009,34 +1009,138 @@ def get_base_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[st
 
 
 # [확정/예정 발행가 추출]
-# - 신주발행가액 / 예정발행가액 / 확정발행가액 섹션 전용
+# - 유상증자 공시에서 "6. 신주 발행가액" 섹션을 최우선으로 읽음
+# - 정정공시는 corr_after 우선
+# - 못 찾으면 기존 일반 발행가액 라벨로 fallback
 def get_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Optional[int]:
     target_kws = ["신주발행가액", "예정발행가액", "확정발행가액", "발행가액"]
-    stop_kws = ["자금", "증자방식", "기준", "할인", "할증", "증자전", "주식수", "납입", "방법", "산정", "일정", "발행목적"]
+    stop_kws = [
+        "자금", "증자방식", "기준", "할인", "할증", "증자전",
+        "주식수", "납입", "방법", "산정", "일정", "발행목적"
+    ]
 
+    def _extract_valid_prices(text: str) -> List[int]:
+        if not text:
+            return []
+
+        txt = str(text)
+        txt = re.sub(r'202\d[년월일\.]?', '', txt)         # 연도 제거
+        txt = re.sub(r'\d+(?:\.\d+)?%', '', txt)           # 퍼센트 제거
+        txt = re.sub(r'^([①-⑩]|\(\d+\)|\d+\.)+', '', txt)  # 앞 번호 제거
+
+        nums = re.findall(
+            r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])",
+            txt
+        )
+
+        vals = []
+        for x in nums:
+            try:
+                val = int(float(x.replace(",", "")))
+                if val >= 50 and val not in [2024, 2025, 2026, 2027]:
+                    vals.append(val)
+            except Exception:
+                pass
+        return vals
+
+    def _first_nonempty_cell(row_vals) -> str:
+        for x in row_vals:
+            s = normalize_text(x)
+            if s:
+                return s
+        return ""
+
+    def _is_section6_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        n = _norm(raw)
+        if not raw:
+            return False
+
+        patterns = [
+            r"^6[\.\)]?신주발행가액$",
+            r"^6[\.\)]?신주의발행가액$",
+            r"^6[\.\)]?1주당신주발행가액$",
+            r"^6[\.\)]?발행가액$",
+        ]
+        if any(re.match(p, n) for p in patterns):
+            return True
+
+        if "6신주발행가액" in n or "6신주의발행가액" in n:
+            return True
+
+        return False
+
+    def _is_new_top_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+        # 예: 7. 청약예정일 / 8) 납입일
+        return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
+
+    # ------------------------------------------------------
+    # 1순위: 정정공시 corr_after 에서 "6. 신주 발행가액" 직접 탐색
+    # ------------------------------------------------------
     if corr_after:
+        for k, v in corr_after.items():
+            k_raw = normalize_text(k)
+            k_norm = _norm(k_raw)
+
+            if _is_section6_heading(k_raw) or "6신주발행가액" in k_norm or "6신주의발행가액" in k_norm:
+                vals = _extract_valid_prices(v)
+                if vals:
+                    return max(vals)
+
+        # 혹시 정정표에 6번 표기는 없고 라벨만 있을 경우 fallback
         for k, v in corr_after.items():
             k_norm = _norm(k)
             if any(t in k_norm for t in target_kws) and not any(s in k_norm for s in stop_kws):
-                v_clean = re.sub(r'202\d[년월일\.]?', '', v)
-                v_clean = re.sub(r'\d+(?:\.\d+)?%', '', v_clean)
-                nums = re.findall(r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])", v_clean)
-                all_vals = []
-                for x in nums:
-                    try:
-                        val = int(float(x.replace(',', '')))
-                        if val >= 50 and val not in [2024, 2025, 2026, 2027]:
-                            all_vals.append(val)
-                    except Exception:
-                        pass
-                if all_vals:
-                    return max(all_vals)
+                vals = _extract_valid_prices(v)
+                if vals:
+                    return max(vals)
 
+    # ------------------------------------------------------
+    # 2순위: 실제 테이블에서 "6. 신주 발행가액" 섹션 블록 추출
+    # ------------------------------------------------------
     for df in dfs:
         try:
             arr = df.astype(str).values
         except Exception:
             continue
+
+        R, C = arr.shape
+
+        for r in range(R):
+            row_list = arr[r].tolist()
+            first_cell = _first_nonempty_cell(row_list)
+            row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
+
+            if _is_section6_heading(first_cell) or _is_section6_heading(row_join):
+                block_texts = []
+
+                for rr in range(r, min(r + 6, R)):
+                    next_row_list = arr[rr].tolist()
+                    next_first = _first_nonempty_cell(next_row_list)
+                    next_join = " ".join([normalize_text(x) for x in next_row_list if normalize_text(x)])
+
+                    # 시작 행 이후 새 대항목이 나오면 중단
+                    if rr > r and _is_new_top_heading(next_first):
+                        break
+
+                    block_texts.append(next_join)
+
+                vals = _extract_valid_prices(" ".join(block_texts))
+                if vals:
+                    return max(vals)
+
+    # ------------------------------------------------------
+    # 3순위: 일반 라벨 기반 fallback
+    # ------------------------------------------------------
+    for df in dfs:
+        try:
+            arr = df.astype(str).values
+        except Exception:
+            continue
+
         R, C = arr.shape
         for r in range(R):
             row_str_norm = _norm("".join(arr[r]))
@@ -1058,21 +1162,11 @@ def get_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[str, st
                         cell_norm = _norm(arr[rr][c])
                         if any(s in cell_norm for s in stop_kws) and not any(t in cell_norm for t in target_kws):
                             continue
+                        all_nums.extend(_extract_valid_prices(arr[rr][c]))
 
-                        cell_clean = re.sub(r'202\d[년월일\.]?', '', cell_norm)
-                        cell_clean = re.sub(r'\d+(?:\.\d+)?%', '', cell_clean)
-                        cell_clean = re.sub(r'^([①-⑩]|\(\d+\)|\d+\.)+', '', cell_clean)
-
-                        nums = re.findall(r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])", cell_clean)
-                        for x in nums:
-                            try:
-                                val = int(float(x.replace(",", "")))
-                                if val >= 50 and val not in [2024, 2025, 2026, 2027]:
-                                    all_nums.append(val)
-                            except Exception:
-                                pass
                 if all_nums:
                     return max(all_nums)
+
     return None
 
 
