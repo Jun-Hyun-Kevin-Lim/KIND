@@ -1346,14 +1346,10 @@ def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) 
 
 # ==========================================================
 # [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
-# - Put Option 시작 헤더:
-#   [조기상환청구권(Put Option)에 관한 사항]
-# - Call Option 시작 헤더:
-#   [매도청구권(Call Option)에 관한 사항]
-# - Put Option 종료 문장:
-#   지급하여야 한다
-# - Call Option 종료 문장:
-#   매도하여야 한다
+# - Put Option: 실제 본문 앵커 "본 사채의 사채권자는 ..."
+# - Call Option: 실제 본문 앵커 "발행회사 또는 발행회사가 지정하는 자 ..."
+# - Put 종료: "지급하여야 한다"
+# - Call 종료: "매도하여야 한다"
 # ==========================================================
 def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
     lines = []
@@ -1369,26 +1365,166 @@ def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
     return corpus.strip()
 
 
-def _cut_option_text(text: str, end_markers: List[str]) -> str:
+def _slice_option_major_section(corpus: str) -> str:
+    """
+    가능하면 '9-1. 옵션에 관한 사항' 구간만 잘라서 탐색
+    """
+    if not corpus:
+        return ""
+
+    start_m = re.search(r"9\s*-\s*1\s*\.\s*옵션에\s*관한\s*사항", corpus, flags=re.I)
+    if not start_m:
+        return corpus
+
+    sub = corpus[start_m.start():]
+
+    # 다음 큰 섹션 전까지만 자르기
+    end_patterns = [
+        r"\n\s*9\s*-\s*2\s*\.",
+        r"\n\s*10\s*\.",
+        r"\n\s*【",
+        r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
+    ]
+
+    end_idx = len(sub)
+    for pat in end_patterns:
+        m = re.search(pat, sub[20:], flags=re.I)
+        if m:
+            end_idx = min(end_idx, 20 + m.start())
+
+    return sub[:end_idx].strip()
+
+
+def _find_earliest_end(text: str, end_patterns: List[str]) -> int:
+    end_positions = []
+    for pat in end_patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            end_positions.append(m.end())
+    return min(end_positions) if end_positions else -1
+
+
+def _cleanup_option_result(text: str) -> str:
     if not text:
         return ""
 
-    end_positions = []
-    for marker in end_markers:
-        idx = text.find(marker)
-        if idx != -1:
-            end_positions.append(idx + len(marker))
-
-    if end_positions:
-        text = text[:min(end_positions)]
-    else:
-        # 종료 문장을 못 찾은 경우 다음 큰 섹션 전까지만 자르기
-        m = re.search(r"\n\s*(?:\[[^\]]+\]|\d+\s*-\s*\d+\.\s*|\d+\.\s*)", text[30:])
-        if m:
-            text = text[:30 + m.start()]
-
+    # pipe / 표 헤더 노이즈 정리
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = re.sub(r"\(주\d+\)", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
+
+    # 중복 헤더 앞부분 정리
+    text = re.sub(
+        r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?",
+        "",
+        text,
+        flags=re.I
+    ).strip()
+
     return text
+
+
+def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
+    corpus = _option_corpus_from_tables(tables)
+    if not corpus:
+        return ""
+
+    option_section = _slice_option_major_section(corpus)
+
+    if option_type == "put":
+        header_patterns = [
+            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"사채권자의\s*조기상환청구권.*?에\s*관한\s*사항",
+        ]
+        anchor_patterns = [
+            r"본\s*사채의\s*사채권자는",
+            r"사채권자는\s*본\s*사채의\s*발행일로부터",
+            r"조기상환을\s*청구할\s*수\s*있",
+        ]
+        end_patterns = [
+            r"지급하여야\s*한다\.?",
+            r"지급하여야\s*합니다\.?",
+            r"지급하여야한다\.?",
+        ]
+        bad_near_patterns = [
+            r"\(주\d+\)",
+            r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)",
+            r"구분\s*조기상환\s*청구기간",
+            r"From\s*To",
+        ]
+    else:
+        header_patterns = [
+            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"발행회사의\s*매도청구권.*?에\s*관한\s*사항",
+        ]
+        anchor_patterns = [
+            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
+            r"발행회사[는가]?",
+            r"매도청구권을\s*행사",
+            r"매도하여야\s*한다",
+        ]
+        end_patterns = [
+            r"매도하여야\s*한다\.?",
+            r"매도하여야\s*합니다\.?",
+            r"매도하여야한다\.?",
+        ]
+        bad_near_patterns = [
+            r"\(주\d+\)",
+            r"구분\s*매도청구권\s*행사기간",
+            r"From\s*To",
+        ]
+
+    candidates = []
+
+    for pat in header_patterns:
+        for m in re.finditer(pat, option_section, flags=re.I):
+            start = m.start()
+            tail = option_section[start:start + 4000]
+
+            # 헤더 직후 250자 안에 앵커가 있어야 "진짜 본문"으로 인정
+            head_window = tail[:250]
+            if not any(re.search(ap, head_window, flags=re.I) for ap in anchor_patterns):
+                continue
+
+            # 헤더 직후 노이즈 많으면 강한 패널티
+            penalty = 0
+            if any(re.search(bp, head_window, flags=re.I) for bp in bad_near_patterns):
+                penalty += 150
+
+            end_pos = _find_earliest_end(tail, end_patterns)
+            if end_pos == -1:
+                continue
+
+            candidate = tail[:end_pos]
+            score = 1000
+
+            # 너무 긴 경우 감점
+            score -= max(0, len(candidate) - 800) // 5
+
+            # 표성 텍스트 많으면 감점
+            if re.search(r"구분\s*조기상환\s*청구기간", candidate, flags=re.I):
+                score -= 300
+            if re.search(r"구분\s*매도청구권\s*행사기간", candidate, flags=re.I):
+                score -= 300
+            if re.search(r"From\s*To", candidate, flags=re.I):
+                score -= 300
+            if re.search(r"\(주\d+\)", candidate, flags=re.I):
+                score -= 100
+
+            score -= penalty
+            candidates.append((score, candidate))
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best = candidates[0][1]
+    return _cleanup_option_result(best)
 
 
 def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
