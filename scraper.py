@@ -1,4 +1,3 @@
-#scraper.py
 import os
 import re
 import json
@@ -57,7 +56,11 @@ class Target:
 
 
 def extract_acpt_no(text: str) -> Optional[str]:
-    m = re.search(r"acptNo=(\d{14})", text or "")
+    if not text:
+        return None
+    m = re.search(r"acptNo=(\d{14})", text or "", flags=re.I)
+    if not m:
+        m = re.search(r"acptno=(\d{14})", text or "", flags=re.I)
     return m.group(1) if m else None
 
 
@@ -73,7 +76,10 @@ def detect_category(title: str) -> str:
 
 
 def viewer_url(acpt_no: str, docno: str = "") -> str:
-    return f"{BASE}/common/disclsviewer.do?method=searchInitInfo&acptNo={acpt_no}&docno={docno}"
+    url = f"{BASE}/common/disclsviewer.do?method=search&acptno={acpt_no}"
+    if docno:
+        url += f"&docno={docno}"
+    return url
 
 
 def ensure_sheet_size(ws, extra_rows_needed: int, min_cols: int):
@@ -140,19 +146,31 @@ def frame_score(html: str) -> int:
     return tcnt * 100 + bonus * 30 + length_bonus
 
 
-def pick_best_frame_html(page) -> str:
-    best_html = ""
-    best_score = -1
+def collect_candidate_htmls(page) -> List[str]:
+    htmls = []
+
+    try:
+        htmls.append(page.content())
+    except Exception:
+        pass
+
     for fr in page.frames:
         try:
             html = fr.content()
-            sc = frame_score(html)
-            if sc > best_score:
-                best_score = sc
-                best_html = html
+            if html:
+                htmls.append(html)
         except Exception:
             continue
-    return best_html
+
+    uniq = []
+    seen = set()
+    for html in htmls:
+        key = re.sub(r"\s+", " ", (html or "")[:5000])
+        if key not in seen:
+            seen.add(key)
+            uniq.append(html)
+
+    return uniq
 
 
 def extract_tables_from_html_robust(html: str) -> List[pd.DataFrame]:
@@ -197,6 +215,77 @@ def extract_tables_from_html_robust(html: str) -> List[pd.DataFrame]:
         raise ValueError("No tables parsed (robust).")
 
     return results
+
+
+def clean_text_line(s: str) -> str:
+    s = (s or "").replace("\xa0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def extract_text_blocks_as_df(html: str) -> List[pd.DataFrame]:
+    soup = BeautifulSoup(html or "", "lxml")
+
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    texts = []
+
+    for tag in soup.find_all(["p", "div", "span", "li", "td", "th"]):
+        txt = clean_text_line(tag.get_text(" ", strip=True))
+        if len(txt) < 8:
+            continue
+        texts.append(txt)
+
+    uniq = []
+    seen = set()
+    for t in texts:
+        key = re.sub(r"\s+", " ", t)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(t)
+
+    important_keywords = [
+        "옵션에 관한 사항",
+        "Put Option",
+        "Call Option",
+        "조기상환청구권",
+        "매도청구권",
+        "전환청구기간",
+        "교환청구기간",
+        "권리행사기간",
+        "발행회사 또는 발행회사가 지정하는 자",
+        "본 사채의 사채권자는",
+        "지급하여야 한다",
+        "매도하여야 한다",
+    ]
+
+    important = [t for t in uniq if any(k in t for k in important_keywords)]
+
+    if not important:
+        return []
+
+    return [pd.DataFrame({"text": important})]
+
+
+def dedupe_dataframes(dfs: List[pd.DataFrame]) -> List[pd.DataFrame]:
+    uniq = []
+    seen = set()
+
+    for df in dfs:
+        try:
+            sig = (
+                tuple(str(c) for c in df.columns.tolist()),
+                tuple(tuple(str(x) for x in row) for row in df.fillna("").astype(str).values.tolist()[:30])
+            )
+        except Exception:
+            continue
+
+        if sig not in seen:
+            seen.add(sig)
+            uniq.append(df)
+
+    return uniq
 
 
 def gs_open():
@@ -297,20 +386,35 @@ def scrape_one(context, t: Target) -> Tuple[List[pd.DataFrame], str]:
     page = context.new_page()
     try:
         page.goto(url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(2000)
 
-        html = pick_best_frame_html(page) or ""
+        html_candidates = collect_candidate_htmls(page)
 
-        if is_block_page(html):
-            save_debug(t.acpt_no, page, page.content(), "block_or_empty")
-            raise RuntimeError("차단/오류/빈 페이지 가능")
+        all_dfs: List[pd.DataFrame] = []
 
-        if html.lower().count("<table") == 0:
-            save_debug(t.acpt_no, page, page.content(), "table0")
-            raise RuntimeError("table 0개로 보임")
+        for html in html_candidates:
+            if not html or is_block_page(html):
+                continue
 
-        dfs = extract_tables_from_html_robust(html)
-        return dfs, url
+            try:
+                dfs = extract_tables_from_html_robust(html)
+                all_dfs.extend(dfs)
+            except Exception:
+                pass
+
+            try:
+                text_dfs = extract_text_blocks_as_df(html)
+                all_dfs.extend(text_dfs)
+            except Exception:
+                pass
+
+        all_dfs = dedupe_dataframes(all_dfs)
+
+        if not all_dfs:
+            save_debug(t.acpt_no, page, page.content(), "no_tables_no_text")
+            raise RuntimeError("테이블/본문 텍스트를 모두 못 찾음")
+
+        return all_dfs, url
 
     finally:
         try:
@@ -376,3 +480,7 @@ def run():
         browser.close()
 
     print(f"[DONE] ok={ok} / total_seen={len(load_seen_from_sheet(seen_ws))}")
+
+
+if __name__ == "__main__":
+    run()
