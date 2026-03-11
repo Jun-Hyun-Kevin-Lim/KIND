@@ -3244,6 +3244,13 @@ def run_parser():
         "fail": fail,
     }
 
+    def run_parser():
+        ok = 0
+        skip = 0
+        fail = 0
+        rights_added = 0
+        bond_added = 0
+
 # [직접 실행 진입점]
 if __name__ == "__main__":
     run_parser()
