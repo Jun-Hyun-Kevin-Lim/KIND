@@ -1118,23 +1118,77 @@ def extract_issue_shares_and_type(
 # [증자전 주식수 추출]
 # - '증자전발행주식총수' 계열 표를 읽어서 총 발행주식수 추출
 def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> Optional[int]:
-    target_kws = ["증자전발행주식총수", "기발행주식총수", "발행주식총수", "증자전주식수", "증자전"]
-    stop_kws = ["신주의종류", "발행예정", "자금조달", "증자방식", "신주발행", "액면가", "발행가", "목적", "일정"]
+    """
+    증자전 주식수는 반드시
+    '3. 증자전 발행주식총수 (주)' 섹션에서만 읽는다.
 
+    우선순위
+    1) 정정공시 corr_after 안의 '3. 증자전 발행주식총수 (주)' 계열
+    2) 실제 표에서 '3. 증자전 발행주식총수 (주)' 섹션 블록 스캔
+    3) 그 섹션 내 합계 우선, 없으면 보통주식 + 기타/종류/우선주식 합산
+    """
+
+    def _extract_section_share_total(text: str) -> Optional[int]:
+        if not text:
+            return None
+
+        cv, ov, tv = parse_shares_from_text(str(text))
+        calc = cv + ov
+
+        if tv > 0 and tv >= calc:
+            return tv
+        if calc > 0:
+            return calc
+        if cv > 0:
+            return cv
+        if ov > 0:
+            return ov
+        return None
+
+    def _first_nonempty_cell(row_vals) -> str:
+        for x in row_vals:
+            s = normalize_text(x)
+            if s:
+                return s
+        return ""
+
+    def _is_section3_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        n = _norm(raw)
+        if not raw:
+            return False
+
+        patterns = [
+            r"^3[\.\)]?증자전발행주식총수\(주\)$",
+            r"^3[\.\)]?증자전발행주식총수$",
+            r"^3[\.\)]?증자전\s*발행주식총수$",
+            r"^3[\.\)]?증자전\s*발행주식총수\(주\)$",
+        ]
+        if any(re.match(p, n) for p in patterns):
+            return True
+
+        if "3증자전발행주식총수" in n:
+            return True
+
+        return False
+
+    def _is_new_top_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+        return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
+
+    # 1순위: 정정공시의 정정후 값에서 정확한 3번 항목만
     if corr_after:
         for k, v in corr_after.items():
-            k_norm = _norm(k)
-            if any(t in k_norm for t in target_kws):
-                if not any(s in k_norm for s in stop_kws):
-                    cv, ov, tv = parse_shares_from_text(str(v))
-                    calc = cv + ov
-                    if tv > 0 and tv >= calc:
-                        return tv
-                    if calc > 0:
-                        return calc
-                    if cv > 0:
-                        return cv
+            k_raw = normalize_text(k)
+            k_norm = _norm(k_raw)
+            if _is_section3_heading(k_raw) or "3증자전발행주식총수" in k_norm:
+                amt = _extract_section_share_total(v)
+                if amt:
+                    return amt
 
+    # 2순위: 실제 표에서 3. 증자전 발행주식총수(주) 섹션만 스캔
     for df in dfs:
         try:
             arr = df.astype(str).values
@@ -1143,48 +1197,28 @@ def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> 
 
         R, C = arr.shape
         for r in range(R):
-            row_str_norm = _norm("".join(arr[r]))
-            combined_target = row_str_norm
-            if r + 1 < R:
-                combined_target += _norm("".join(arr[r + 1]))
+            row_list = arr[r].tolist()
+            first_cell = _first_nonempty_cell(row_list)
+            row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
 
-            if any(t in combined_target for t in target_kws):
-                if any(s in row_str_norm for s in stop_kws) and not any(t in row_str_norm for t in target_kws):
-                    continue
+            if _is_section3_heading(first_cell) or _is_section3_heading(row_join):
+                block_texts = []
+                for rr in range(r, min(r + 6, R)):
+                    next_row_list = arr[rr].tolist()
+                    next_first = _first_nonempty_cell(next_row_list)
+                    next_join = " ".join([normalize_text(x) for x in next_row_list if normalize_text(x)])
 
-                block_text = ""
-                search_start = max(0, r - 1)
+                    if rr > r and _is_new_top_heading(next_first):
+                        break
 
-                for rr in range(search_start, min(r + 7, R)):
-                    curr_row_norm = _norm("".join(arr[rr]))
+                    if next_join:
+                        block_texts.append(next_join)
 
-                    if rr < r and any(s in curr_row_norm for s in stop_kws + ["액면", "자금", "방식"]):
-                        continue
-
-                    if rr > r + 1:
-                        clean_next = _clean_label(curr_row_norm)
-                        if len(curr_row_norm) != len(clean_next):
-                            if any(k in curr_row_norm for k in ["액면", "자금", "가액", "증자", "목적", "방식", "신주", "예정"]):
-                                break
-
-                    for c in range(C):
-                        cell_str = _norm(arr[rr][c])
-                        if any(s in cell_str for s in stop_kws) and not any(t in cell_str for t in target_kws):
-                            continue
-                        block_text += " " + cell_str
-
-                cv, ov, tv = parse_shares_from_text(block_text)
-                calc_tot = cv + ov
-
-                if tv > 0 and tv >= calc_tot:
-                    return tv
-                if calc_tot > 0:
-                    return calc_tot
-                if cv > 0:
-                    return cv
+                amt = _extract_section_share_total(" ".join(block_texts))
+                if amt:
+                    return amt
 
     return None
-
 
 # [기준주가 추출]
 # - 기준주가 / 기준발행가액 섹션만 정밀하게 읽음
