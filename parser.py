@@ -2145,11 +2145,186 @@ def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) 
 
 # ==========================================================
 # [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
-# - Put Option: 실제 본문 앵커 "본 사채의 사채권자는 ..."
-# - Call Option: 실제 본문 앵커 "발행회사 또는 발행회사가 지정하는 자 ..."
-# - Put 종료: "지급하여야 한다"
-# - Call 종료: "매도하여야 한다"
+# - 구조 우선순위:
+#   1) 병렬 2열형 (Put / Call 좌우 분리)
+#   2) 라벨-값형
+#   3) 단일 text 세로형
+#   4) 본문 fallback
 # ==========================================================
+
+def _option_rule_pack(option_type: str) -> Dict[str, List[str]]:
+    option_type = (option_type or "").strip().lower()
+
+    if option_type == "put":
+        return {
+            "header_strong": [
+                r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+                r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"1\.\s*사채권자\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)",
+                r"1\)\s*사채의\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"\(1\)\s*사채의\s*만기전\s*조기상환청구권\s*\(\s*Put[\-\s]*Option\s*\)",
+                r"가\.\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            ],
+            "header_weak": [
+                r"^\s*Put\s*Option\s*$",
+                r"Put\s*Option",
+                r"풋옵션",
+                r"조기상환청구권",
+                r"조기상환권",
+                r"만기전\s*조기상환청구권",
+            ],
+            "anchors": [
+                r"본\s*사채의\s*사채권자는",
+                r"사채권자는",
+                r"본\s*사채의\s*인수인은",
+                r"인수인은",
+                r"투자자는",
+                r"조기상환을\s*청구",
+                r"조기상환청구권을\s*행사",
+            ],
+            "terminal": [
+                r"지급하여야\s*한다\.?",
+                r"이자는\s*계산하지\s*아니한다\.?",
+                r"요구할\s*수\s*없다\.?",
+            ],
+            "stop": [
+                r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+                r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"Call\s*Option",
+                r"콜옵션",
+                r"매도청구권",
+                r"중도상환청구권",
+            ],
+            "noise": [
+                r"구분\s*조기상환\s*청구기간",
+                r"From\s*To",
+                r"시작일\s*종료일",
+                r"성명\s*및\s*관계",
+                r"정정전",
+                r"정정후",
+                r"변경사유",
+            ],
+            "opposite_text": [
+                "매도청구권",
+                "call option",
+                "콜옵션",
+                "중도상환청구권",
+            ],
+        }
+
+    return {
+        "header_strong": [
+            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"2\.\s*발행회사의\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)",
+            r"2\)\s*발행회사의\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"\(2\)\s*콜옵션에\s*관한\s*사항",
+            r"나\.\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"나\.\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        ],
+        "header_weak": [
+            r"^\s*Call\s*Option\s*$",
+            r"Call\s*Option",
+            r"콜옵션",
+            r"매도청구권",
+            r"중도상환청구권",
+        ],
+        "anchors": [
+            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
+            r"발행회사(?:는|가)",
+            r"회사는",
+            r"매도청구권자",
+            r"매도청구권을\s*행사",
+            r"매수인에게\s*매도하여야\s*한다",
+        ],
+        "terminal": [
+            r"매도하여야\s*한다\.?",
+            r"행사를\s*보장하지\s*않는다\.?",
+            r"이자는\s*계산하지\s*아니한다\.?",
+        ],
+        "stop": [
+            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"Put\s*Option",
+            r"풋옵션",
+            r"조기상환청구권",
+            r"조기상환권",
+        ],
+        "noise": [
+            r"구분\s*매도청구권\s*행사기간",
+            r"From\s*To",
+            r"시작일\s*종료일",
+            r"성명\s*및\s*관계",
+            r"정정전",
+            r"정정후",
+            r"변경사유",
+        ],
+        "opposite_text": [
+            "조기상환청구권",
+            "put option",
+            "풋옵션",
+            "조기상환권",
+        ],
+    }
+
+
+def _option_text_has_any(text: str, patterns: List[str]) -> bool:
+    if not text:
+        return False
+    return any(re.search(p, text, flags=re.I) for p in patterns)
+
+
+def _option_first_nonempty_cell(row_vals) -> str:
+    for x in row_vals:
+        s = normalize_text(x)
+        if s:
+            return s
+    return ""
+
+
+def _option_row_join(row_vals) -> str:
+    return " ".join([normalize_text(x) for x in row_vals if normalize_text(x)]).strip()
+
+
+def _option_is_major_heading(text: str) -> bool:
+    raw = normalize_text(text)
+    if not raw:
+        return False
+    return bool(
+        re.match(r"^(?:\d+\s*-\s*\d+|\d+)\s*[\.\)]\s*[가-힣A-Za-z]", raw)
+    )
+
+
+def _option_is_heading_only(text: str, option_type: str) -> bool:
+    s = normalize_text(text)
+    if not s:
+        return True
+
+    rules = _option_rule_pack(option_type)
+    has_header = _option_text_has_any(s, rules["header_strong"] + rules["header_weak"])
+    has_anchor = _option_text_has_any(s, rules["anchors"])
+    has_terminal = _option_text_has_any(s, rules["terminal"])
+
+    if has_header and not has_anchor and not has_terminal and len(s) <= 80:
+        return True
+
+    if len(s) <= 25 and has_header:
+        return True
+
+    return False
+
+
+def _option_has_anchor(text: str, option_type: str) -> bool:
+    return _option_text_has_any(normalize_text(text), _option_rule_pack(option_type)["anchors"])
+
+
+def _option_has_terminal(text: str, option_type: str) -> bool:
+    return _option_text_has_any(normalize_text(text), _option_rule_pack(option_type)["terminal"])
+
+
 def _option_cell_units_from_tables(tables: List[pd.DataFrame]) -> List[Dict[str, Any]]:
     units = []
 
@@ -2176,12 +2351,39 @@ def _option_cell_units_from_tables(tables: List[pd.DataFrame]) -> List[Dict[str,
     return units
 
 
+def _option_related_tables(tables: List[pd.DataFrame]) -> List[pd.DataFrame]:
+    option_kws = [
+        "Put Option",
+        "Call Option",
+        "풋옵션",
+        "콜옵션",
+        "조기상환청구권",
+        "매도청구권",
+        "중도상환청구권",
+        "옵션에 관한 사항",
+        "기타 투자판단에 참고할 사항",
+    ]
+
+    picked = []
+    for df in tables:
+        try:
+            txt = flatten_table_text(df)
+        except Exception:
+            continue
+
+        if any(k.lower() in txt.lower() for k in option_kws):
+            picked.append(df)
+
+    return picked if picked else tables
+
+
 def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
     """
-    기존처럼 행 전체를 join하지 않고,
-    셀 하나를 한 줄로 취급해서 Put/Call 섞임을 줄인다.
+    옵션 관련 테이블만 대상으로,
+    셀 하나를 한 줄로 취급해서 corpus 생성.
     """
-    units = _option_cell_units_from_tables(tables)
+    related = _option_related_tables(tables)
+    units = _option_cell_units_from_tables(related)
     lines = [u["text"] for u in units if normalize_text(u["text"])]
 
     corpus = "\n".join(lines)
@@ -2236,7 +2438,6 @@ def _slice_option_major_section(corpus: str) -> str:
     ]
     sections = []
 
-    # 1순위: 9-1 옵션 섹션
     block_91 = _slice_block_from_heading(
         corpus,
         [
@@ -2248,7 +2449,6 @@ def _slice_option_major_section(corpus: str) -> str:
     if block_91:
         sections.append(block_91)
 
-    # 2순위: 실제 상세 본문이 자주 들어가는 22/23/24 기타 투자판단 섹션
     for no in ["22", "23", "24"]:
         block = _slice_block_from_heading(
             corpus,
@@ -2280,8 +2480,6 @@ def _slice_option_major_section(corpus: str) -> str:
     return "\n".join(dedup).strip()
 
 
-# [종료 문구 위치 탐색]
-# - 여러 종료 패턴 중 가장 먼저 나오는 위치를 반환
 def _find_earliest_end(text: str, end_patterns: List[str], start_pos: int = 0) -> int:
     end_positions = []
     for pat in end_patterns:
@@ -2291,7 +2489,6 @@ def _find_earliest_end(text: str, end_patterns: List[str], start_pos: int = 0) -
     return min(end_positions) if end_positions else -1
 
 
-# [다음 섹션 경계 위치 탐색]
 def _find_earliest_boundary(text: str, boundary_patterns: List[str], start_pos: int = 0) -> int:
     hit_positions = []
     for pat in boundary_patterns:
@@ -2301,174 +2498,286 @@ def _find_earliest_boundary(text: str, boundary_patterns: List[str], start_pos: 
     return min(hit_positions) if hit_positions else -1
 
 
-# [옵션 추출 결과 후처리]
-# - 파이프 구분자, 각주, 중복 공백 제거
 def _cleanup_option_result(text: str) -> str:
     if not text:
         return ""
+
+    text = normalize_text(text)
     text = re.sub(r"\s*\|\s*", " ", text)
     text = re.sub(r"\(주\d+\)", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?", "", text, flags=re.I).strip()
+    text = re.sub(
+        r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
     return text
 
-def extract_option_value_by_same_column(
+
+def extract_option_from_parallel_columns(
     tables: List[pd.DataFrame],
     option_type: str,
 ) -> str:
     """
-    Put/Call 옵션이 좌우 2열 표로 들어온 경우를 우선 해결하기 위한 함수.
-    시작 셀을 찾은 뒤 같은 열(column) 아래 방향으로만 본문을 모은다.
+    병렬 2열형:
+    Put / Call 헤더가 같은 row의 서로 다른 column에 있는 경우,
+    해당 column 아래만 따라 내려간다.
     """
+    rules = _option_rule_pack(option_type)
+    related = _option_related_tables(tables)
+    candidates = []
 
-    def _matches_any(text: str, patterns: List[str]) -> bool:
-        if not text:
-            return False
-        return any(re.search(p, text, flags=re.I) for p in patterns)
+    put_rules = _option_rule_pack("put")
+    call_rules = _option_rule_pack("call")
 
-    def _is_major_heading(text: str) -> bool:
-        raw = normalize_text(text)
-        if not raw:
-            return False
-        return bool(re.match(r"^(?:\d+\s*-\s*\d+|\d+)\s*[\.\)]\s*[가-힣A-Za-z]", raw))
-
-    if option_type == "put":
-        start_patterns = [
-            r"^\s*Put\s*Option\s*$",
-            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"1\.\s*사채권자\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)",
-            r"1\)\s*사채의\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"\(1\)\s*사채의\s*만기전\s*조기상환청구권\s*\(\s*Put[\-\s]*Option\s*\)",
-            r"가\.\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"조기상환청구권",
-            r"Put\s*Option",
-        ]
-        anchor_patterns = [
-            r"본\s*사채의\s*사채권자는",
-            r"사채권자는",
-            r"본\s*사채의\s*인수인은",
-            r"인수인은",
-            r"조기상환을\s*청구",
-        ]
-        stop_patterns = [
-            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"Call\s*Option",
-            r"콜옵션",
-        ]
-        terminal_patterns = [
-            r"지급하여야\s*한다\.?",
-            r"이자는\s*계산하지\s*아니한다\.?",
-            r"요구할\s*수\s*없다\.?",
-        ]
-    else:
-        start_patterns = [
-            r"^\s*Call\s*Option\s*$",
-            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"2\.\s*발행회사의\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)",
-            r"2\)\s*발행회사의\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"\(2\)\s*콜옵션에\s*관한\s*사항",
-            r"나\.\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"나\.\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"매도청구권",
-            r"중도상환청구권",
-            r"Call\s*Option",
-        ]
-        anchor_patterns = [
-            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
-            r"발행회사는",
-            r"매도청구권자",
-            r"매도청구권을\s*행사",
-            r"매수인에게\s*매도하여야\s*한다",
-        ]
-        stop_patterns = [
-            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"Put\s*Option",
-            r"풋옵션",
-            r"조기상환청구권",
-        ]
-        terminal_patterns = [
-            r"매도하여야\s*한다\.?",
-            r"행사를\s*보장하지\s*않는다\.?",
-            r"이자는\s*계산하지\s*아니한다\.?",
-        ]
-
-    candidates: List[str] = []
-
-    for df in tables:
+    for df in related:
         try:
             arr = df.fillna("").astype(str).values
         except Exception:
             continue
 
         R, C = arr.shape
+        for r in range(R):
+            row_cells = [normalize_text(x) for x in arr[r].tolist()]
 
+            put_cols = [
+                i for i, x in enumerate(row_cells)
+                if _option_text_has_any(x, put_rules["header_strong"] + put_rules["header_weak"])
+            ]
+            call_cols = [
+                i for i, x in enumerate(row_cells)
+                if _option_text_has_any(x, call_rules["header_strong"] + call_rules["header_weak"])
+            ]
+
+            if not put_cols or not call_cols:
+                continue
+
+            if option_type == "put":
+                target_col = put_cols[0]
+                opposite_cols = call_cols
+            else:
+                target_col = call_cols[0]
+                opposite_cols = put_cols
+
+            lines = []
+            saw_anchor = False
+
+            for rr in range(r, min(R, r + 25)):
+                target_txt = normalize_text(arr[rr][target_col]) if target_col < C else ""
+                row_join = _option_row_join(arr[rr].tolist())
+
+                opposite_row_text = " ".join(
+                    [
+                        normalize_text(arr[rr][oc])
+                        for oc in opposite_cols
+                        if oc < C and normalize_text(arr[rr][oc])
+                    ]
+                ).strip()
+
+                if rr > r:
+                    if opposite_row_text and _option_text_has_any(opposite_row_text, rules["stop"]):
+                        pass
+
+                    if target_txt and _option_text_has_any(target_txt, rules["stop"]):
+                        break
+
+                    if _option_is_major_heading(row_join) and not _option_text_has_any(
+                        target_txt, rules["header_strong"] + rules["header_weak"]
+                    ):
+                        if saw_anchor:
+                            break
+
+                if not target_txt:
+                    if rr > r and saw_anchor:
+                        break
+                    continue
+
+                lines.append(target_txt)
+
+                if _option_text_has_any(target_txt, rules["anchors"]):
+                    saw_anchor = True
+
+                if _option_text_has_any(target_txt, rules["terminal"]):
+                    break
+
+            candidate = _cleanup_option_result(" ".join(lines))
+            if not candidate:
+                continue
+            if _option_is_heading_only(candidate, option_type):
+                continue
+            candidates.append(candidate)
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda x: _score_option_text(x, option_type), reverse=True)
+    return candidates[0]
+
+
+def extract_option_value_by_same_column(
+    tables: List[pd.DataFrame],
+    option_type: str,
+) -> str:
+    """
+    기존 함수명 유지.
+    실제로는 병렬 2열형 전용 extractor를 호출.
+    """
+    return extract_option_from_parallel_columns(tables, option_type)
+
+
+def extract_option_from_label_value_rows(
+    tables: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+    option_type: str,
+) -> str:
+    """
+    라벨-값형:
+    '조기상환청구권(Put Option)에 관한 사항 | 본문'
+    '매도청구권(Call Option)에 관한 사항 | 본문'
+    """
+    rules = _option_rule_pack(option_type)
+    candidates = []
+
+    if corr_after:
+        for k, v in corr_after.items():
+            k_txt = normalize_text(k)
+            v_txt = normalize_text(v)
+
+            if _option_text_has_any(k_txt, rules["header_strong"] + rules["header_weak"]):
+                cand = _cleanup_option_result(v_txt)
+                if cand and not _option_is_heading_only(cand, option_type):
+                    candidates.append(cand)
+
+    related = _option_related_tables(tables)
+    for df in related:
+        try:
+            arr = df.fillna("").astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
         for r in range(R):
             for c in range(C):
                 cell = normalize_text(arr[r][c])
                 if not cell:
                     continue
 
-                if not _matches_any(cell, start_patterns):
+                if not _option_text_has_any(cell, rules["header_strong"] + rules["header_weak"]):
                     continue
 
-                lines = []
-                saw_anchor = False
+                right_vals = []
+                for cc in range(c + 1, min(C, c + 5)):
+                    val = normalize_text(arr[r][cc])
+                    if val:
+                        right_vals.append(val)
 
-                for rr in range(r, min(R, r + 20)):
-                    txt = normalize_text(arr[rr][c])
-                    if not txt:
-                        if rr > r and lines:
-                            break
-                        continue
+                if r + 1 < R:
+                    down_right = []
+                    for cc in range(c, min(C, c + 4)):
+                        val = normalize_text(arr[r + 1][cc])
+                        if val:
+                            down_right.append(val)
+                    if down_right:
+                        right_vals.append(" ".join(down_right))
 
-                    if rr > r:
-                        if _matches_any(txt, stop_patterns):
-                            break
-                        if _is_major_heading(txt) and not _matches_any(txt, start_patterns):
-                            break
-
-                    lines.append(txt)
-
-                    if _matches_any(txt, anchor_patterns):
-                        saw_anchor = True
-
-                    if _matches_any(txt, terminal_patterns):
-                        break
-
-                candidate = _cleanup_option_result(" ".join(lines))
-                candidate = normalize_text(candidate)
-
+                candidate = _cleanup_option_result(" ".join(right_vals))
                 if not candidate:
                     continue
-
-                if len(candidate) < 15:
+                if _option_is_heading_only(candidate, option_type):
                     continue
-
-                if not saw_anchor and len(candidate) < 40:
-                    continue
-
                 candidates.append(candidate)
 
     if not candidates:
         return ""
 
-    candidates = sorted(
-        candidates,
-        key=lambda x: _score_option_text(x, option_type),
-        reverse=True,
-    )
+    candidates.sort(key=lambda x: _score_option_text(x, option_type), reverse=True)
     return candidates[0]
 
-# [옵션 본문 섹션 통추출]
-# - Put/Call 섹션 제목부터 실제 종료문구까지 통째로 자름
-# - 네가 말한 "original 버전"을 무조건 1순위(default)로 사용
+
+def extract_option_from_single_text_rows(
+    tables: List[pd.DataFrame],
+    option_type: str,
+) -> str:
+    """
+    단일 text 세로형:
+    제목행 -> 본문행 -> 종료행 순서로 내려가는 구조 처리.
+    """
+    rules = _option_rule_pack(option_type)
+    related = _option_related_tables(tables)
+    candidates = []
+
+    for df in related:
+        try:
+            arr = df.fillna("").astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
+        for r in range(R):
+            row_join = _option_row_join(arr[r].tolist())
+            if not row_join:
+                continue
+
+            has_put = _option_text_has_any(
+                row_join,
+                _option_rule_pack("put")["header_strong"] + _option_rule_pack("put")["header_weak"],
+            )
+            has_call = _option_text_has_any(
+                row_join,
+                _option_rule_pack("call")["header_strong"] + _option_rule_pack("call")["header_weak"],
+            )
+
+            # 같은 row에 Put/Call 둘 다 있으면 병렬형으로 간주하고 여기서는 스킵
+            if has_put and has_call:
+                continue
+
+            if not _option_text_has_any(row_join, rules["header_strong"] + rules["header_weak"]):
+                continue
+
+            block_lines = []
+            saw_anchor = False
+
+            for rr in range(r, min(R, r + 20)):
+                curr_join = _option_row_join(arr[rr].tolist())
+                curr_first = _option_first_nonempty_cell(arr[rr].tolist())
+
+                if not curr_join:
+                    if rr > r and saw_anchor:
+                        break
+                    continue
+
+                if rr > r:
+                    if _option_text_has_any(curr_join, rules["stop"]):
+                        break
+                    if _option_is_major_heading(curr_first) and not _option_text_has_any(
+                        curr_join, rules["anchors"]
+                    ):
+                        if saw_anchor:
+                            break
+
+                block_lines.append(curr_join)
+
+                if _option_text_has_any(curr_join, rules["anchors"]):
+                    saw_anchor = True
+
+                if _option_text_has_any(curr_join, rules["terminal"]):
+                    break
+
+            candidate = _cleanup_option_result(" ".join(block_lines))
+            if not candidate:
+                continue
+            if _option_is_heading_only(candidate, option_type):
+                continue
+            candidates.append(candidate)
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda x: _score_option_text(x, option_type), reverse=True)
+    return candidates[0]
+
+
 def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
     corpus = _option_corpus_from_tables(tables)
     if not corpus:
@@ -2640,7 +2949,11 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
                     if re.search(npat, head_250, flags=re.I):
                         score -= 90
 
-                end_pos = _find_earliest_end(tail, rule_pack["end_patterns"], start_pos=max(anchor_pos, 0))
+                end_pos = _find_earliest_end(
+                    tail,
+                    rule_pack["end_patterns"],
+                    start_pos=max(anchor_pos, 0),
+                )
                 if end_pos != -1:
                     score += 60
                 else:
@@ -2688,18 +3001,8 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
     return _cleanup_option_result(best)
 
 
-# [옵션 본문 상세 추출 fallback]
-# - 위 '섹션 통추출' 실패 시 보조적으로 사용하는 fallback
-# - 키워드 주변 window를 잡아서 본문성 있는 부분만 최대한 남김
 def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
-    if option_type == "put":
-        my_kws = ["조기상환청구권", "Put Option", "풋옵션", "조기상환권", "사채권자의 조기상환청구권"]
-        opp_kws = ["매도청구권", "Call Option", "콜옵션", "중도상환청구권"]
-        anchor_regex = r"(본\s*사채의\s*사채권자는|본\s*사채의\s*인수인은|사채권자는|인수인은|투자자는)"
-    else:
-        my_kws = ["매도청구권", "Call Option", "콜옵션", "중도상환청구권", "발행회사의 매도청구권"]
-        opp_kws = ["조기상환청구권", "Put Option", "풋옵션", "조기상환권"]
-        anchor_regex = r"(발행회사\s*또는\s*발행회사가\s*지정하는\s*자(?:\([^)]*\))?(?:는|가)?|발행회사(?:는|가)|회사는\s*만기\s*전|본\s*사채는\s*만기\s*전)"
+    rules = _option_rule_pack(option_type)
 
     corpus = _option_corpus_from_tables(tables)
     corpus = normalize_text(corpus)
@@ -2707,33 +3010,24 @@ def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: 
         return ""
 
     candidates = []
-    for kw in my_kws:
+    keywords = []
+    if option_type == "put":
+        keywords = ["조기상환청구권", "Put Option", "풋옵션", "조기상환권"]
+    else:
+        keywords = ["매도청구권", "Call Option", "콜옵션", "중도상환청구권"]
+
+    for kw in keywords:
         for m in re.finditer(re.escape(kw), corpus, re.IGNORECASE):
             idx = m.start()
-            window = corpus[max(0, idx - 50) : idx + 1200]
+            window = corpus[max(0, idx - 50) : idx + 1400]
             score = 0
 
-            if option_type == "put":
-                if re.search(r"사채권자|인수인|투자자", window):
-                    score += 50
-                if re.search(r"청구할\s*수\s*있다|조기상환을\s*청구", window):
-                    score += 50
-                if "의무보유" in window:
-                    score -= 200
-            else:
-                if re.search(r"발행회사|매수|매도청구", window):
-                    score += 50
-                if re.search(r"매수할\s*수\s*있다|매도를\s*청구", window):
-                    score += 50
-                if "의무보유" in window and "사채권자" in window:
-                    score -= 200
-
-            if "매매일" in window and "상환율" in window:
-                score -= 300
-            if "from" in window.lower() and "to" in window.lower():
-                score -= 300
-            if "성명 및 관계" in window:
-                score -= 300
+            if _option_text_has_any(window, rules["anchors"]):
+                score += 120
+            if _option_text_has_any(window, rules["terminal"]):
+                score += 80
+            if _option_text_has_any(window, rules["noise"]):
+                score -= 250
 
             candidates.append((score, window))
 
@@ -2745,20 +3039,15 @@ def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: 
     if best_score < 0:
         return ""
 
-    m = re.search(anchor_regex, best_window)
-    if m and m.start() < 150:
-        result = best_window[m.start():]
-    else:
-        result = best_window
+    result = best_window
 
-    for _ in range(3):
-        result = re.sub(r"^([\[【<\(]?\s*[①-⑩\d가-힣a-zA-Z][\.\)\]】>]\s*)+", "", result)
+    for pat in rules["anchors"]:
+        m = re.search(pat, result, flags=re.I)
+        if m:
+            result = result[m.start():]
+            break
 
-    prefix_pattern = r"^(?:본\s*사채의\s*|발행회사의\s*)?(?:조기상환청구권|매도청구권|중도상환청구권|콜옵션|풋옵션|Put\s*Option|Call\s*Option|PUT\s*OPTION|CALL\s*OPTION)[^가-힣]*?(?:에\s*관한\s*사항|청구권자|행사|부여|비율|한도)?\s*[:\]\-\>]*\s*"
-    result = re.sub(prefix_pattern, "", result, flags=re.IGNORECASE)
-    result = re.sub(r"^[:\-\]\s]+", "", result)
-
-    stop_kws = opp_kws + [
+    stop_kws = rules["opposite_text"] + [
         "기타사항",
         "합병 관련 사항",
         "청약일",
@@ -2775,17 +3064,14 @@ def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: 
         if s_idx > 20 and s_idx < cut_idx:
             cut_idx = s_idx
 
-    result = normalize_text(result[:cut_idx])
+    result = _cleanup_option_result(result[:cut_idx])
 
-    if len(result) < 5:
+    if _option_is_heading_only(result, option_type):
         return ""
 
-    return result[:300] + ("..." if len(result) > 300 else "")
+    return result[:500] + ("..." if len(result) > 500 else "")
 
 
-# [Call Option 본문에서 Call 비율 / YTC 추출]
-# - 표 라벨에서 못 찾았을 때 Call Option 본문에서 % 값을 재추출
-# - 명시 패턴 우선, 없으면 퍼센트 후보를 heuristic으로 분류
 def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
     text = normalize_text(text)
     if not text:
@@ -2838,7 +3124,6 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
     return ratio, ytc
 
 
-# [정규식 패턴 중 가장 먼저 나오는 매치 찾기]
 def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
     best = None
     for pat in patterns:
@@ -2855,10 +3140,6 @@ def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
     return best
 
 
-# [앵커 기준 옵션 블록 추출]
-# - put: "Put Option" / "풋옵션"이 보이는 지점부터 "Call Option" / "콜옵션" 직전까지
-# - call: "Call Option" / "콜옵션"이 보이는 지점부터 다음 큰 섹션 전까지
-# - 기존 로직을 대체하는 게 아니라 마지막 fallback용으로 추가
 def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type: str) -> str:
     corpus = _option_corpus_from_tables(tables)
     if not corpus:
@@ -2907,11 +3188,9 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
     if not start_hit:
         return ""
 
-    # 매치 지점이 아니라 "그 줄의 시작"부터 가져오도록 보정
     start_pos = corpus.rfind("\n", 0, start_hit[0]) + 1
     sub = corpus[start_pos:]
 
-    # start 이후부터만 stop 찾기
     local_anchor_pos = start_hit[0] - start_pos
     search_from = min(len(sub), max(0, local_anchor_pos + 1))
 
@@ -2927,55 +3206,50 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
     result = sub[:end_pos].strip()
     result = _cleanup_option_result(result)
 
-    # 너무 짧으면 의미 없는 값으로 판단
-    if len(result) < 10:
+    if len(result) < 10 or _option_is_heading_only(result, option_type):
         return ""
 
     return result
 
 
-# [옵션 후보 중 가장 좋은 값 선택]
-# - 기존 primary / 기존 fallback / 새 anchor fallback 중에서
-# 가장 본문성이 높은 값을 고른다
 def _score_option_text(text: str, option_type: str) -> int:
     s = normalize_text(text)
     if not s:
         return -(10**9)
 
+    rules = _option_rule_pack(option_type)
     n = _norm(s)
-    score = min(len(s), 700)
+    score = min(len(s), 800)
 
-    noise_kws = [
-        "구분조기상환청구기간",
-        "구분매도청구권행사기간",
-        "fromto",
-        "시작일종료일",
-        "정정전",
-        "정정후",
-        "항목",
-        "변경사유",
-        "성명및관계",
-    ]
-    if any(k in n for k in noise_kws):
-        score -= 300
+    if _option_text_has_any(s, rules["anchors"]):
+        score += 300
+    if _option_text_has_any(s, rules["terminal"]):
+        score += 120
+    if _option_text_has_any(s, rules["header_strong"]):
+        score += 80
+    if _option_text_has_any(s, rules["noise"]):
+        score -= 350
+
+    if _option_is_heading_only(s, option_type):
+        score -= 700
 
     if option_type == "put":
         if "putoption" in n or "풋옵션" in n:
-            score += 180
-        if "조기상환청구권" in n or "사채권자" in n or "조기상환" in n or "청구" in n:
             score += 120
+        if "조기상환청구권" in n or "사채권자" in n or "조기상환" in n:
+            score += 80
         if ("calloption" in n or "콜옵션" in n) and not ("putoption" in n or "풋옵션" in n):
-            score -= 500
+            score -= 600
     else:
         if "calloption" in n or "콜옵션" in n:
-            score += 180
-        if "매도청구권" in n or "발행회사" in n or "지정하는자" in n or "매도" in n:
             score += 120
+        if "매도청구권" in n or "발행회사" in n or "지정하는자" in n:
+            score += 80
         if ("putoption" in n or "풋옵션" in n) and not ("calloption" in n or "콜옵션" in n):
-            score -= 500
+            score -= 600
 
     if len(s) < 20:
-        score -= 150
+        score -= 200
 
     return score
 
@@ -3004,183 +3278,27 @@ def choose_best_option_value(option_type: str, *candidates: str) -> str:
     return best
 
 
-# [옵션 1차 추출]
-# - "원래 방식" 우선:
-# 1) corr_after / 라벨-값 구조에서 직접 추출
-# 2) 표에서 해당 라벨 주변 값 추출
-# - 값이 없을 때만 섹션 본문 파싱으로 fallback 하도록 설계
 def extract_option_value_primary(
     dfs: List[pd.DataFrame],
     corr_after: Dict[str, str],
     option_type: str,
 ) -> str:
-    if option_type == "put":
-        label_candidates = [
-            "조기상환청구권(Put Option)에 관한 사항",
-            "조기상환청구권 (Put Option)에 관한 사항",
-            "가. 조기상환청구권(Put Option)에 관한 사항",
-            "가. 조기상환청구권 (Put Option)에 관한 사항",
-            "조기상환청구권에 관한 사항",
-            "Put Option에 관한 사항",
-            "조기상환청구권",
-            "Put Option",
-            "풋옵션",
-            "사채권자 조기상환청구권(Put Option)",
-            "사채권자 조기상환청구권 (Put Option)",
-            "사채의 만기전 조기상환청구권(Put-Option)",
-            "사채의 만기전 조기상환청구권 (Put-Option)",
-            "만기전 조기상환청구권",
-            "조기상환권",
-        ]
-        opposite_markers = ["매도청구권", "Call Option", "콜옵션"]
-    else:
-        label_candidates = [
-            "매도청구권(Call Option)에 관한 사항",
-            "매도청구권 (Call Option)에 관한 사항",
-            "나. 매도청구권(Call Option)에 관한 사항",
-            "나. 매도청구권 (Call Option)에 관한 사항",
-            "매도청구권에 관한 사항",
-            "Call Option에 관한 사항",
-            "매도청구권",
-            "Call Option",
-            "콜옵션",
-            "중도상환청구권(Call Option)에 관한 사항",
-            "중도상환청구권 (Call Option)에 관한 사항",
-            "발행회사의 중도상환청구권(Call Option)에 관한 사항",
-            "발행회사의 중도상환청구권 (Call Option)에 관한 사항",
-            "발행회사 매도청구권(Call Option)",
-            "발행회사 매도청구권 (Call Option)",
-            "콜옵션에 관한 사항",
-            "중도상환청구권",
-        ]
-        opposite_markers = ["조기상환청구권", "Put Option", "풋옵션"]
+    """
+    1차 추출은 이제 구조 기반으로 바꿈.
+    - 병렬 2열형
+    - 라벨-값형
+    - 단일 text 세로형
+    """
+    parallel_val = extract_option_from_parallel_columns(dfs, option_type)
+    label_val = extract_option_from_label_value_rows(dfs, corr_after, option_type)
+    single_text_val = extract_option_from_single_text_rows(dfs, option_type)
 
-    def _first_nonempty_cell(row_vals) -> str:
-        for x in row_vals:
-            s = normalize_text(x)
-            if s:
-                return s
-        return ""
-
-    def _clean_option_text(text: str) -> str:
-        s = normalize_text(text)
-        if not s:
-            return ""
-
-        s = re.sub(r"^(가|나|다|라|마|바)\.\s*", "", s)
-
-        if option_type == "put":
-            s = re.sub(
-                r"^조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*[:：]?\s*",
-                "",
-                s,
-                flags=re.I,
-            )
-            s = re.sub(
-                r"^조기상환청구권\s*[:：]?\s*",
-                "",
-                s,
-                flags=re.I,
-            )
-        else:
-            s = re.sub(
-                r"^매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*[:：]?\s*",
-                "",
-                s,
-                flags=re.I,
-            )
-            s = re.sub(
-                r"^매도청구권\s*[:：]?\s*",
-                "",
-                s,
-                flags=re.I,
-            )
-
-        s = re.sub(r"\s*\|\s*", " ", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        return s
-
-    def _looks_like_noise(text: str) -> bool:
-        s = normalize_text(text)
-        if not s:
-            return True
-        s_norm = _norm(s)
-        if s in ("-", ".", ","):
-            return True
-        if re.fullmatch(r"[\d,\.\-%\s]+", s):
-            return True
-
-        noise_kws = [
-            "구분조기상환청구기간",
-            "구분매도청구권행사기간",
-            "fromto",
-            "시작일종료일",
-            "정정전",
-            "정정후",
-            "항목",
-            "변경사유",
-        ]
-        if any(k in s_norm for k in noise_kws):
-            return True
-
-        return False
-
-    def _is_new_heading(text: str) -> bool:
-        raw = normalize_text(text)
-        if not raw:
-            return False
-        return bool(re.match(r"^\d+\s*-\s*\d+\s*[\.\)]", raw))
-
-    direct = scan_label_value_preferring_correction(dfs, label_candidates, corr_after)
-    direct = _clean_option_text(direct)
-    if direct and not _looks_like_noise(direct):
-        return direct
-
-    if corr_after:
-        for k, v in corr_after.items():
-            k_norm = _norm(k)
-            if any(_norm(lb) in k_norm for lb in label_candidates):
-                cleaned = _clean_option_text(v)
-                if cleaned and not _looks_like_noise(cleaned):
-                    return cleaned
-
-    for df in dfs:
-        try:
-            arr = df.fillna("").astype(str).values
-        except Exception:
-            continue
-
-        R, C = arr.shape
-        for r in range(R):
-            row_vals = arr[r].tolist()
-            row_join = " ".join([normalize_text(x) for x in row_vals if normalize_text(x)])
-            row_norm = _norm(row_join)
-
-            if not any(_norm(lb) in row_norm for lb in label_candidates):
-                continue
-
-            block_lines = []
-            for rr in range(r, min(r + 8, R)):
-                next_row_vals = arr[rr].tolist()
-                next_row_join = " ".join([normalize_text(x) for x in next_row_vals if normalize_text(x)])
-                next_first = _first_nonempty_cell(next_row_vals)
-
-                if not next_row_join:
-                    continue
-
-                if rr > r:
-                    if any(k.lower() in next_row_join.lower() for k in opposite_markers):
-                        break
-                    if _is_new_heading(next_first):
-                        break
-
-                block_lines.append(next_row_join)
-
-            candidate = _clean_option_text(" ".join(block_lines))
-            if candidate and not _looks_like_noise(candidate):
-                return candidate
-
-    return ""
+    return choose_best_option_value(
+        option_type,
+        parallel_val,
+        label_val,
+        single_text_val,
+    )
 
 
 # [기간형 날짜 2개 추출]
@@ -3589,30 +3707,30 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
+    put_primary_val = extract_option_value_primary(tables, corr_after, "put")
     put_column_val = extract_option_value_by_same_column(tables, "put")
     put_section_val = extract_option_section_from_tables(tables, "put")
-    put_primary_val = extract_option_value_primary(tables, corr_after, "put")
     put_anchor_val = extract_option_block_by_anchor_range(tables, "put")
     put_detail_val = extract_option_details_from_tables(tables, "put")
     row["Put Option"] = choose_best_option_value(
         "put",
+        put_primary_val,
         put_column_val,
         put_section_val,
-        put_primary_val,
         put_anchor_val,
         put_detail_val,
     )
     
+    call_primary_val = extract_option_value_primary(tables, corr_after, "call")
     call_column_val = extract_option_value_by_same_column(tables, "call")
     call_section_val = extract_option_section_from_tables(tables, "call")
-    call_primary_val = extract_option_value_primary(tables, corr_after, "call")
     call_anchor_val = extract_option_block_by_anchor_range(tables, "call")
     call_detail_val = extract_option_details_from_tables(tables, "call")
     row["Call Option"] = choose_best_option_value(
         "call",
+        call_primary_val,
         call_column_val,
         call_section_val,
-        call_primary_val,
         call_anchor_val,
         call_detail_val,
     )
