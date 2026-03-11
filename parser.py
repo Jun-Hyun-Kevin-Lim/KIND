@@ -1223,6 +1223,111 @@ def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> 
 # [기준주가 추출]
 # - 기준주가 / 기준발행가액 섹션만 정밀하게 읽음
 # - 확정발행가나 날짜 숫자가 섞여 들어오는 문제를 최대한 방지
+def get_base_price_by_exact_section(
+    dfs: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+) -> Optional[int]:
+    """
+    기준주가는 반드시 '7. 기준주가' 섹션에서만 추출한다.
+    - 정정공시는 corr_after에서 '7. 기준주가' 항목 우선
+    - 일반 공시는 실제 표에서 '7. 기준주가' 섹션 블록만 읽음
+    - 다른 라벨(기준발행가액 등)에서 넓게 찾지 않음
+    """
+
+    def _extract_valid_prices(text: str) -> List[int]:
+        if not text:
+            return []
+        txt = str(text)
+        txt = re.sub(r"202\d[년월일\.]?", "", txt)
+        txt = re.sub(r"\d+(?:\.\d+)?%", "", txt)
+        txt = re.sub(r"^([①-⑩]|\(\d+\)|\d+\.)+", "", txt)
+
+        nums = re.findall(
+            r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])",
+            txt,
+        )
+
+        vals = []
+        for x in nums:
+            try:
+                val = int(float(x.replace(",", "")))
+                if val >= 50 and val not in [2024, 2025, 2026, 2027]:
+                    vals.append(val)
+            except Exception:
+                pass
+        return vals
+
+    def _first_nonempty_cell(row_vals) -> str:
+        for x in row_vals:
+            s = normalize_text(x)
+            if s:
+                return s
+        return ""
+
+    def _is_section7_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        n = _norm(raw)
+        if not raw:
+            return False
+
+        patterns = [
+            r"^7[\.\)]?기준주가$",
+            r"^7[\.\)]?기준발행가액$",
+        ]
+        if any(re.match(p, n) for p in patterns):
+            return True
+        if "7기준주가" in n or "7기준발행가액" in n:
+            return True
+        return False
+
+    def _is_new_top_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+        return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
+
+    if corr_after:
+        for k, v in corr_after.items():
+            k_raw = normalize_text(k)
+            k_norm = _norm(k_raw)
+            if _is_section7_heading(k_raw) or "7기준주가" in k_norm or "7기준발행가액" in k_norm:
+                vals = _extract_valid_prices(v)
+                if vals:
+                    return max(vals)
+
+    for df in dfs:
+        try:
+            arr = df.astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
+        for r in range(R):
+            row_list = arr[r].tolist()
+            first_cell = _first_nonempty_cell(row_list)
+            row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
+
+            if _is_section7_heading(first_cell) or _is_section7_heading(row_join):
+                block_texts = []
+                for rr in range(r, min(r + 6, R)):
+                    next_row_list = arr[rr].tolist()
+                    next_first = _first_nonempty_cell(next_row_list)
+                    next_join = " ".join([normalize_text(x) for x in next_row_list if normalize_text(x)])
+
+                    if rr > r and _is_new_top_heading(next_first):
+                        break
+                    block_texts.append(next_join)
+
+                vals = _extract_valid_prices(" ".join(block_texts))
+                if vals:
+                    return max(vals)
+
+    return None
+
+# [확정/예정 발행가 추출]
+# - 유상증자 공시에서 "6. 신주 발행가액" 섹션을 최우선으로 읽음
+# - 정정공시는 corr_after 우선
+# - 못 찾으면 기존 일반 발행가액 라벨로 fallback
 def get_price_by_exact_section(
     dfs: List[pd.DataFrame],
     corr_after: Dict[str, str],
@@ -1405,162 +1510,6 @@ def get_price_by_exact_section(
                 price = _extract_price_from_block_rows(block_rows)
                 if price is not None:
                     return price
-
-    return None
-
-
-# [확정/예정 발행가 추출]
-# - 유상증자 공시에서 "6. 신주 발행가액" 섹션을 최우선으로 읽음
-# - 정정공시는 corr_after 우선
-# - 못 찾으면 기존 일반 발행가액 라벨로 fallback
-def get_price_by_exact_section(
-    dfs: List[pd.DataFrame],
-    corr_after: Dict[str, str],
-) -> Optional[int]:
-    target_kws = ["신주발행가액", "예정발행가액", "확정발행가액", "발행가액"]
-    stop_kws = [
-        "자금",
-        "증자방식",
-        "기준",
-        "할인",
-        "할증",
-        "증자전",
-        "주식수",
-        "납입",
-        "방법",
-        "산정",
-        "일정",
-        "발행목적",
-    ]
-
-    def _extract_valid_prices(text: str) -> List[int]:
-        if not text:
-            return []
-        txt = str(text)
-        txt = re.sub(r"202\d[년월일\.]?", "", txt)
-        txt = re.sub(r"\d+(?:\.\d+)?%", "", txt)
-        txt = re.sub(r"^([①-⑩]|\(\d+\)|\d+\.)+", "", txt)
-
-        nums = re.findall(
-            r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])",
-            txt,
-        )
-
-        vals = []
-        for x in nums:
-            try:
-                val = int(float(x.replace(",", "")))
-                if val >= 50 and val not in [2024, 2025, 2026, 2027]:
-                    vals.append(val)
-            except Exception:
-                pass
-        return vals
-
-    def _first_nonempty_cell(row_vals) -> str:
-        for x in row_vals:
-            s = normalize_text(x)
-            if s:
-                return s
-        return ""
-
-    def _is_section6_heading(text: str) -> bool:
-        raw = normalize_text(text)
-        n = _norm(raw)
-        if not raw:
-            return False
-
-        patterns = [
-            r"^6[\.\)]?신주발행가액$",
-            r"^6[\.\)]?신주의발행가액$",
-            r"^6[\.\)]?1주당신주발행가액$",
-            r"^6[\.\)]?발행가액$",
-        ]
-        if any(re.match(p, n) for p in patterns):
-            return True
-        if "6신주발행가액" in n or "6신주의발행가액" in n:
-            return True
-        return False
-
-    def _is_new_top_heading(text: str) -> bool:
-        raw = normalize_text(text)
-        if not raw:
-            return False
-        return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
-
-    if corr_after:
-        for k, v in corr_after.items():
-            k_raw = normalize_text(k)
-            k_norm = _norm(k_raw)
-            if _is_section6_heading(k_raw) or "6신주발행가액" in k_norm or "6신주의발행가액" in k_norm:
-                vals = _extract_valid_prices(v)
-                if vals:
-                    return max(vals)
-
-        for k, v in corr_after.items():
-            k_norm = _norm(k)
-            if any(t in k_norm for t in target_kws) and not any(s in k_norm for s in stop_kws):
-                vals = _extract_valid_prices(v)
-                if vals:
-                    return max(vals)
-
-    for df in dfs:
-        try:
-            arr = df.astype(str).values
-        except Exception:
-            continue
-
-        R, C = arr.shape
-        for r in range(R):
-            row_list = arr[r].tolist()
-            first_cell = _first_nonempty_cell(row_list)
-            row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
-
-            if _is_section6_heading(first_cell) or _is_section6_heading(row_join):
-                block_texts = []
-                for rr in range(r, min(r + 6, R)):
-                    next_row_list = arr[rr].tolist()
-                    next_first = _first_nonempty_cell(next_row_list)
-                    next_join = " ".join([normalize_text(x) for x in next_row_list if normalize_text(x)])
-
-                    if rr > r and _is_new_top_heading(next_first):
-                        break
-                    block_texts.append(next_join)
-
-                vals = _extract_valid_prices(" ".join(block_texts))
-                if vals:
-                    return max(vals)
-
-    for df in dfs:
-        try:
-            arr = df.astype(str).values
-        except Exception:
-            continue
-
-        R, C = arr.shape
-        for r in range(R):
-            row_str_norm = _norm("".join(arr[r]))
-            if any(t in row_str_norm for t in target_kws):
-                if any(s in row_str_norm for s in stop_kws) and not any(t in row_str_norm for t in target_kws):
-                    continue
-
-                all_nums = []
-                for rr in range(r, min(r + 4, R)):
-                    curr_row_norm = _norm("".join(arr[rr]))
-                    if rr > r:
-                        clean_next = _clean_label(curr_row_norm)
-                        if len(curr_row_norm) != len(clean_next):
-                            break
-                        if any(s in curr_row_norm for s in stop_kws):
-                            break
-
-                    for c in range(C):
-                        cell_norm = _norm(arr[rr][c])
-                        if any(s in cell_norm for s in stop_kws) and not any(t in cell_norm for t in target_kws):
-                            continue
-                        all_nums.extend(_extract_valid_prices(arr[rr][c]))
-
-                if all_nums:
-                    return max(all_nums)
 
     return None
 
