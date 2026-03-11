@@ -1223,39 +1223,22 @@ def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> 
 # [기준주가 추출]
 # - 기준주가 / 기준발행가액 섹션만 정밀하게 읽음
 # - 확정발행가나 날짜 숫자가 섞여 들어오는 문제를 최대한 방지
-def get_base_price_by_exact_section(
+def get_price_by_exact_section(
     dfs: List[pd.DataFrame],
     corr_after: Dict[str, str],
 ) -> Optional[int]:
     """
-    기준주가는 반드시 '7. 기준주가' 섹션에서만 추출한다.
-    - 정정공시는 corr_after에서 '7. 기준주가' 항목 우선
-    - 일반 공시는 실제 표에서 '7. 기준주가' 섹션 블록만 읽음
-    - 다른 라벨(기준발행가액 등)에서 넓게 찾지 않음
+    확정발행가(원)은 반드시 '6. 신주 발행가액' 섹션에서만 가져온다.
+
+    우선순위
+    1) 정정공시 corr_after 안의 '6. 신주 발행가액' 계열
+    2) 실제 표에서 '6. 신주 발행가액' 섹션 블록 스캔
+
+    규칙
+    - '보통주식 (원)' 값을 최우선으로 추출
+    - 없으면 같은 6번 섹션 안의 첫 유효 가격을 사용
+    - 다른 섹션 / 일반 발행가액 라벨 fallback 금지
     """
-
-    def _extract_valid_prices(text: str) -> List[int]:
-        if not text:
-            return []
-        txt = str(text)
-        txt = re.sub(r"202\d[년월일\.]?", "", txt)
-        txt = re.sub(r"\d+(?:\.\d+)?%", "", txt)
-        txt = re.sub(r"^([①-⑩]|\(\d+\)|\d+\.)+", "", txt)
-
-        nums = re.findall(
-            r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])",
-            txt,
-        )
-
-        vals = []
-        for x in nums:
-            try:
-                val = int(float(x.replace(",", "")))
-                if val >= 50 and val not in [2024, 2025, 2026, 2027]:
-                    vals.append(val)
-            except Exception:
-                pass
-        return vals
 
     def _first_nonempty_cell(row_vals) -> str:
         for x in row_vals:
@@ -1264,20 +1247,24 @@ def get_base_price_by_exact_section(
                 return s
         return ""
 
-    def _is_section7_heading(text: str) -> bool:
+    def _is_section6_heading(text: str) -> bool:
         raw = normalize_text(text)
         n = _norm(raw)
         if not raw:
             return False
 
         patterns = [
-            r"^7[\.\)]?기준주가$",
-            r"^7[\.\)]?기준발행가액$",
+            r"^6[\.\)]?신주발행가액$",
+            r"^6[\.\)]?신주의발행가액$",
+            r"^6[\.\)]?1주당신주발행가액$",
+            r"^6[\.\)]?발행가액$",
         ]
         if any(re.match(p, n) for p in patterns):
             return True
-        if "7기준주가" in n or "7기준발행가액" in n:
+
+        if "6신주발행가액" in n or "6신주의발행가액" in n:
             return True
+
         return False
 
     def _is_new_top_heading(text: str) -> bool:
@@ -1286,18 +1273,114 @@ def get_base_price_by_exact_section(
             return False
         return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
 
+    def _extract_valid_prices(text: str) -> List[int]:
+        if not text:
+            return []
+
+        txt = str(text)
+        txt = re.sub(r"202\d[년월일\.]?", "", txt)
+        txt = re.sub(r"\d+(?:\.\d+)?%", "", txt)
+        txt = re.sub(r"^([①-⑩]|\(\d+\)|\d+\.)+", "", txt)
+
+        nums = re.findall(
+            r"(?<![\d.])\d{1,3}(?:,\d{3})*(?![\d.])|(?<![\d.])\d+(?![\d.])",
+            txt,
+        )
+
+        vals = []
+        for x in nums:
+            try:
+                v = int(x.replace(",", ""))
+                if v >= 50 and v not in [2024, 2025, 2026, 2027]:
+                    vals.append(v)
+            except Exception:
+                pass
+        return vals
+
+    def _extract_common_stock_price_from_text(text: str) -> Optional[int]:
+        if not text:
+            return None
+
+        txt = normalize_text(text)
+
+        patterns = [
+            r"보통주식\s*\(\s*원\s*\)\s*[:：]?\s*([0-9][0-9,]*)",
+            r"보통주식\s*[:：]?\s*([0-9][0-9,]*)",
+            r"보통주\s*\(\s*원\s*\)\s*[:：]?\s*([0-9][0-9,]*)",
+            r"보통주\s*[:：]?\s*([0-9][0-9,]*)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, txt)
+            if m:
+                try:
+                    v = int(m.group(1).replace(",", ""))
+                    if v >= 50:
+                        return v
+                except Exception:
+                    pass
+
+        return None
+
+    def _extract_price_from_block_rows(block_rows: List[List[str]]) -> Optional[int]:
+        # 1순위: 보통주식(원) 근처 숫자
+        for row in block_rows:
+            row_clean = [normalize_text(x) for x in row]
+
+            for c, cell in enumerate(row_clean):
+                cell_norm = _norm(cell)
+
+                if "보통주식" in cell_norm or "보통주" in cell_norm:
+                    # 같은 행 오른쪽 우선
+                    for cand in row_clean[c + 1 : c + 5]:
+                        v = _to_int(cand)
+                        if v is not None and v >= 50:
+                            return v
+
+                    # 같은 행 전체 문자열에서 재시도
+                    joined = " ".join([x for x in row_clean if x])
+                    v2 = _extract_common_stock_price_from_text(joined)
+                    if v2 is not None:
+                        return v2
+
+        # 2순위: 섹션 전체 텍스트에서 보통주식 패턴 찾기
+        block_text = " ".join(
+            [
+                " ".join([normalize_text(x) for x in row if normalize_text(x)])
+                for row in block_rows
+            ]
+        )
+        v3 = _extract_common_stock_price_from_text(block_text)
+        if v3 is not None:
+            return v3
+
+        # 3순위: 6번 섹션 안 첫 유효 숫자
+        for row in block_rows:
+            joined = " ".join([normalize_text(x) for x in row if normalize_text(x)])
+            vals = _extract_valid_prices(joined)
+            if vals:
+                return vals[0]
+
+        return None
+
+    # 1순위: 정정공시
     if corr_after:
         for k, v in corr_after.items():
             k_raw = normalize_text(k)
             k_norm = _norm(k_raw)
-            if _is_section7_heading(k_raw) or "7기준주가" in k_norm or "7기준발행가액" in k_norm:
-                vals = _extract_valid_prices(v)
-                if vals:
-                    return max(vals)
 
+            if _is_section6_heading(k_raw) or "6신주발행가액" in k_norm or "6신주의발행가액" in k_norm:
+                price = _extract_common_stock_price_from_text(str(v))
+                if price is not None:
+                    return price
+
+                vals = _extract_valid_prices(str(v))
+                if vals:
+                    return vals[0]
+
+    # 2순위: 실제 표 스캔
     for df in dfs:
         try:
-            arr = df.astype(str).values
+            arr = df.fillna("").astype(str).values
         except Exception:
             continue
 
@@ -1307,20 +1390,21 @@ def get_base_price_by_exact_section(
             first_cell = _first_nonempty_cell(row_list)
             row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
 
-            if _is_section7_heading(first_cell) or _is_section7_heading(row_join):
-                block_texts = []
+            if _is_section6_heading(first_cell) or _is_section6_heading(row_join):
+                block_rows = []
+
                 for rr in range(r, min(r + 6, R)):
                     next_row_list = arr[rr].tolist()
                     next_first = _first_nonempty_cell(next_row_list)
-                    next_join = " ".join([normalize_text(x) for x in next_row_list if normalize_text(x)])
 
                     if rr > r and _is_new_top_heading(next_first):
                         break
-                    block_texts.append(next_join)
 
-                vals = _extract_valid_prices(" ".join(block_texts))
-                if vals:
-                    return max(vals)
+                    block_rows.append(next_row_list)
+
+                price = _extract_price_from_block_rows(block_rows)
+                if price is not None:
+                    return price
 
     return None
 
