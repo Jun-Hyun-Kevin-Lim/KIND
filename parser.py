@@ -3355,33 +3355,6 @@ def extract_option_value_primary(
         single_text_val,
     )
 
-
-def debug_option_candidates(acpt_no: str, tables: List[pd.DataFrame], corr_after: Dict[str, str]):
-    print(f"\n[DEBUG_OPTION] acpt_no={acpt_no}")
-
-    put_candidates = {
-        "primary": extract_option_value_primary(tables, corr_after, "put"),
-        "same_column": extract_option_value_by_same_column(tables, "put"),
-        "section": extract_option_section_from_tables(tables, "put"),
-        "anchor_range": extract_option_block_by_anchor_range(tables, "put"),
-        "details": extract_option_details_from_tables(tables, "put"),
-    }
-
-    call_candidates = {
-        "primary": extract_option_value_primary(tables, corr_after, "call"),
-        "same_column": extract_option_value_by_same_column(tables, "call"),
-        "section": extract_option_section_from_tables(tables, "call"),
-        "anchor_range": extract_option_block_by_anchor_range(tables, "call"),
-        "details": extract_option_details_from_tables(tables, "call"),
-    }
-
-    for k, v in put_candidates.items():
-        print(f"[PUT][{k}] {v[:500] if v else ''}")
-
-    for k, v in call_candidates.items():
-        print(f"[CALL][{k}] {v[:500] if v else ''}")
-
-
 # [기간형 날짜 2개 추출]
 # - 전환청구기간 / 교환청구기간 / 권리행사기간 블록에서 시작일/종료일 추출
 def extract_period_dates_from_tables(
