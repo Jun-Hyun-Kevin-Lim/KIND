@@ -1,13 +1,12 @@
-#action
 name: KIND Pipeline -> Google Sheets
 
 on:
   workflow_dispatch:
   schedule:
-   # 1. KST 평일 07:00 ~ 08:59 (UTC 일~목 22:00 ~ 23:59)
-   - cron: '* 22,23 * * 0-4'
-      # 2. KST 평일 09:00 ~ 21:59 (UTC 월~금 00:00 ~ 12:59)
-   - cron: '* 0-12 * * 1-5'
+    # 1. KST 평일 07:00 ~ 08:59 (UTC 일~목 22:00 ~ 23:59)
+    - cron: "* 22,23 * * 0-4"
+    # 2. KST 평일 09:00 ~ 21:59 (UTC 월~금 00:00 ~ 12:59)
+    - cron: "* 0-12 * * 1-5"
 
 jobs:
   run-kind-pipeline:
@@ -25,6 +24,7 @@ jobs:
       RIGHTS_SHEET_NAME: "유상증자"
       BOND_SHEET_NAME: "주식연계채권"
       PARSE_LOG_SHEET_NAME: "parse_log"
+      REVIEW_SHEET_NAME: "review_queue"
       KEYWORDS: "유상증자결정,전환사채권발행결정,교환사채권발행결정,신주인수권부사채권발행결정"
 
     steps:
@@ -57,6 +57,10 @@ jobs:
       - name: Run parser
         run: |
           python main_parse.py
+
+      - name: Run validator
+        run: |
+          python validator.py
 
       - name: Upload debug artifacts
         if: always()
