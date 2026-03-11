@@ -26,6 +26,7 @@ REVIEW_HEADERS = [
     "보고서명",
     "검토등급",
     "의심사유",
+    "누락컬럼",
     "링크",
     "검토시각",
 ]
@@ -49,10 +50,34 @@ def ensure_ws(sh, title: str, rows: int = 2000, cols: int = 30):
 
 
 def ensure_header(ws, headers: List[str]):
-    current = ws.row_values(1)
-    if current != headers:
-        ws.clear()
+    """
+    헤더가 바뀌어도 기존 데이터를 최대한 보존하면서 새 헤더로 맞춤.
+    (기존 ensure_header처럼 clear만 하면 review_queue 이력이 날아갈 수 있어서 개선)
+    """
+    values = ws.get_all_values()
+
+    if not values:
         ws.update("A1", [headers])
+        return
+
+    current_headers = values[0]
+    if current_headers == headers:
+        return
+
+    old_idx = {h: i for i, h in enumerate(current_headers)}
+    migrated_rows = []
+
+    for row in values[1:]:
+        new_row = []
+        for h in headers:
+            if h in old_idx and old_idx[h] < len(row):
+                new_row.append(row[old_idx[h]])
+            else:
+                new_row.append("")
+        migrated_rows.append(new_row)
+
+    ws.clear()
+    ws.update("A1", [headers] + migrated_rows)
 
 
 def normalize_text(x: Any) -> str:
@@ -157,6 +182,86 @@ def get_existing_review_keys(review_ws) -> Set[Tuple[str, str, str]]:
         if acpt and sheet_name and reason:
             keys.add((acpt, sheet_name, reason))
     return keys
+
+
+def get_missing_columns_rights(row: Dict[str, str]) -> List[str]:
+    missing: List[str] = []
+
+    required_common = [
+        "접수번호",
+        "회사명",
+        "보고서명",
+        "상장시장",
+        "증자방식",
+        "발행상품",
+        "신규발행주식수",
+        "납입일",
+        "링크",
+    ]
+
+    for field in required_common:
+        if not normalize_text(row.get(field, "")):
+            missing.append(field)
+
+    if not (
+        _norm_date(row.get("이사회결의일", ""))
+        or _norm_date(row.get("최초 이사회결의일", ""))
+    ):
+        missing.append("이사회결의일/최초 이사회결의일")
+
+    if not normalize_text(row.get("확정발행가(원)", "")):
+        missing.append("확정발행가(원)")
+
+    if not normalize_text(row.get("기준주가", "")):
+        missing.append("기준주가")
+
+    if not normalize_text(row.get("신주의 상장 예정일", "")):
+        missing.append("신주의 상장 예정일")
+
+    method = normalize_text(row.get("증자방식", ""))
+    if "제3자배정" in method and not normalize_text(row.get("투자자", "")):
+        missing.append("투자자")
+
+    return list(dict.fromkeys(missing))
+
+
+def get_missing_columns_bond(row: Dict[str, str]) -> List[str]:
+    missing: List[str] = []
+
+    required_common = [
+        "접수번호",
+        "회사명",
+        "보고서명",
+        "구분",
+        "발행상품",
+        "납입일",
+        "만기",
+        "링크",
+    ]
+
+    for field in required_common:
+        if not normalize_text(row.get(field, "")):
+            missing.append(field)
+
+    bond_type = normalize_text(row.get("구분", ""))
+
+    # 공통적으로 중요하게 보는 값
+    for field in ["행사(전환)가액(원)", "전환청구 시작", "전환청구 종료"]:
+        if not normalize_text(row.get(field, "")):
+            missing.append(field)
+
+    # CB / BW는 전환주식수도 핵심
+    if bond_type in ("CB", "BW"):
+        if not normalize_text(row.get("전환주식수", "")):
+            missing.append("전환주식수")
+
+    return list(dict.fromkeys(missing))
+
+
+def get_missing_columns(sheet_name: str, row: Dict[str, str]) -> List[str]:
+    if sheet_name == RIGHTS_SHEET_NAME:
+        return get_missing_columns_rights(row)
+    return get_missing_columns_bond(row)
 
 
 def validate_rights_row(row: Dict[str, str]) -> List[str]:
@@ -322,6 +427,12 @@ def build_review_rows(sheet_name: str, records: List[Dict[str, str]], existing_k
         else:
             flags = validate_bond_row(row)
 
+        missing_cols = get_missing_columns(sheet_name, row)
+        missing_cols_text = ", ".join(missing_cols)
+
+        if missing_cols:
+            add_flag(flags, "MED", "누락컬럼", "필수값 비어있음", missing_cols_text)
+
         if not flags:
             continue
 
@@ -337,6 +448,7 @@ def build_review_rows(sheet_name: str, records: List[Dict[str, str]], existing_k
             row.get("보고서명", ""),
             judge_level(flags),
             reason,
+            missing_cols_text,
             row.get("링크", ""),
             now,
         ])
