@@ -13,8 +13,8 @@ GOOGLE_CREDENTIALS_JSON = (
     or os.environ.get("GOOGLE_CREDS", "").strip()
 )
 
-RIGHTS_SHEET_NAME = os.getenv("RIGHTS_SHEET_NAME", "유상증자")
-BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "주식연계채권")
+RIGHTS_SHEET_NAME = os.getenv("RIGHTS_SHEET_NAME", "K_유상증자")
+BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "K_주식연계채권")
 SEEN_SHEET_NAME = os.getenv("SEEN_SHEET_NAME", "seen")
 REVIEW_SHEET_NAME = os.getenv("REVIEW_SHEET_NAME", "review_queue")
 REVIEW_LOOKBACK_MINUTES = int(os.getenv("REVIEW_LOOKBACK_MINUTES", "20"))
