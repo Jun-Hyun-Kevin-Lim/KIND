@@ -1426,6 +1426,35 @@ def get_price_by_exact_section(
 
         return None
 
+    # [추가] 정정후 / 변경후가 같이 있을 때는 뒤쪽 값을 우선
+    def _extract_price_preferring_after(text: str) -> Optional[int]:
+        if not text:
+            return None
+
+        txt = normalize_text(text)
+
+        for marker in ["정정후", "변경후"]:
+            if marker in txt:
+                after_txt = txt.split(marker, 1)[1]
+
+                v = _extract_common_stock_price_from_text(after_txt)
+                if v is not None:
+                    return v
+
+                vals = _extract_valid_prices(after_txt)
+                if vals:
+                    return vals[0]
+
+        v = _extract_common_stock_price_from_text(txt)
+        if v is not None:
+            return v
+
+        vals = _extract_valid_prices(txt)
+        if vals:
+            return vals[0]
+
+        return None
+
     def _extract_price_from_block_rows(block_rows: List[List[str]]) -> Optional[int]:
         # 1순위: 보통주식(원) 근처 숫자
         for row in block_rows:
@@ -1443,7 +1472,7 @@ def get_price_by_exact_section(
 
                     # 같은 행 전체 문자열에서 재시도
                     joined = " ".join([x for x in row_clean if x])
-                    v2 = _extract_common_stock_price_from_text(joined)
+                    v2 = _extract_price_preferring_after(joined)
                     if v2 is not None:
                         return v2
 
@@ -1454,16 +1483,16 @@ def get_price_by_exact_section(
                 for row in block_rows
             ]
         )
-        v3 = _extract_common_stock_price_from_text(block_text)
+        v3 = _extract_price_preferring_after(block_text)
         if v3 is not None:
             return v3
 
         # 3순위: 6번 섹션 안 첫 유효 숫자
         for row in block_rows:
             joined = " ".join([normalize_text(x) for x in row if normalize_text(x)])
-            vals = _extract_valid_prices(joined)
-            if vals:
-                return vals[0]
+            v4 = _extract_price_preferring_after(joined)
+            if v4 is not None:
+                return v4
 
         return None
 
@@ -1474,13 +1503,11 @@ def get_price_by_exact_section(
             k_norm = _norm(k_raw)
 
             if _is_section6_heading(k_raw) or "6신주발행가액" in k_norm or "6신주의발행가액" in k_norm:
-                price = _extract_common_stock_price_from_text(str(v))
+                # k + v 같이 봐서 정정후가 같이 붙어 있는 경우도 처리
+                merged_text = f"{k_raw} {normalize_text(v)}"
+                price = _extract_price_preferring_after(merged_text)
                 if price is not None:
                     return price
-
-                vals = _extract_valid_prices(str(v))
-                if vals:
-                    return vals[0]
 
     # 2순위: 실제 표 스캔
     for df in dfs:
