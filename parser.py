@@ -1799,26 +1799,24 @@ def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
 
 
 # [옵션 대섹션만 자르기]
-# - "9-1. 옵션에 관한 사항"부터 다음 큰 섹션 전까지만 사용
-# - Put/Call 외 다른 본문 혼입을 줄이기 위함
-def _slice_option_major_section(corpus: str) -> str:
+# - 9-1. 옵션에 관한 사항 우선
+# - 9-1이 요약만 있고 실제 본문이 22/23/24. 기타 투자판단에 참고할 사항에 있는 경우까지 포함
+def _slice_block_from_heading(corpus: str, heading_patterns: List[str], end_patterns: List[str]) -> str:
     if not corpus:
         return ""
 
-    start_m = re.search(r"9\s*-\s*1\s*\.\s*옵션에\s*관한\s*사항", corpus, flags=re.I)
-    if not start_m:
-        return corpus
+    start_hit = None
+    for pat in heading_patterns:
+        m = re.search(pat, corpus, flags=re.I)
+        if m and (start_hit is None or m.start() < start_hit.start()):
+            start_hit = m
 
-    sub = corpus[start_m.start():]
+    if not start_hit:
+        return ""
 
-    end_patterns = [
-        r"\n\s*9\s*-\s*2\s*\.",
-        r"\n\s*10\s*\.",
-        r"\n\s*【",
-        r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
-    ]
-
+    sub = corpus[start_hit.start():]
     end_idx = len(sub)
+
     for pat in end_patterns:
         m = re.search(pat, sub[20:], flags=re.I)
         if m:
@@ -1827,15 +1825,85 @@ def _slice_option_major_section(corpus: str) -> str:
     return sub[:end_idx].strip()
 
 
+def _slice_option_major_section(corpus: str) -> str:
+    if not corpus:
+        return ""
+
+    common_end_patterns = [
+        r"\n\s*9\s*-\s*2\s*\.",
+        r"\n\s*10\s*\.",
+        r"\n\s*24\s*[\.\)]\s*정관에\s*정한\s*신주인수권의\s*내용",
+        r"\n\s*25\s*[\.\)]",
+        r"\n\s*【",
+        r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
+        #r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
+    ]
+
+    sections = []
+
+    # 1순위: 9-1 옵션 섹션
+    block_91 = _slice_block_from_heading(
+        corpus,
+        [
+            r"9\s*-\s*1\s*\.\s*옵션에\s*관한\s*사항",
+            r"9\s*-\s*1\s*\)\s*옵션에\s*관한\s*사항",
+        ],
+        common_end_patterns,
+    )
+    if block_91:
+        sections.append(block_91)
+
+    # 2순위: 실제 상세 본문이 자주 들어가는 22/23/24 기타 투자판단 섹션
+    for no in ["22", "23", "24"]:
+        block = _slice_block_from_heading(
+            corpus,
+            [
+                rf"{no}\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
+                rf"{no}\s*[\.\)]\s*기타\s*투자판단에\s*참고할사항",
+            ],
+            common_end_patterns,
+        )
+        if block and re.search(
+            r"Put\s*Option|Call\s*Option|조기상환청구권|매도청구권|중도상환청구권|풋옵션|콜옵션",
+            block,
+            flags=re.I,
+        ):
+            sections.append(block)
+
+    if not sections:
+        return corpus
+
+    dedup = []
+    seen = set()
+    for sec in sections:
+        key = _norm(sec)
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(sec)
+
+    return "\n".join(dedup).strip()
+
+
 # [종료 문구 위치 탐색]
 # - 여러 종료 패턴 중 가장 먼저 나오는 위치를 반환
-def _find_earliest_end(text: str, end_patterns: List[str]) -> int:
+def _find_earliest_end(text: str, end_patterns: List[str], start_pos: int = 0) -> int:
     end_positions = []
     for pat in end_patterns:
-        m = re.search(pat, text, flags=re.I)
+        m = re.search(pat, text[start_pos:], flags=re.I)
         if m:
-            end_positions.append(m.end())
+            end_positions.append(start_pos + m.end())
     return min(end_positions) if end_positions else -1
+
+
+# [다음 섹션 경계 위치 탐색]
+def _find_earliest_boundary(text: str, boundary_patterns: List[str], start_pos: int = 0) -> int:
+    hit_positions = []
+    for pat in boundary_patterns:
+        m = re.search(pat, text[start_pos:], flags=re.I)
+        if m:
+            hit_positions.append(start_pos + m.start())
+    return min(hit_positions) if hit_positions else -1
 
 
 # [옵션 추출 결과 후처리]
@@ -1854,101 +1922,227 @@ def _cleanup_option_result(text: str) -> str:
 
 # [옵션 본문 섹션 통추출]
 # - Put/Call 섹션 제목부터 실제 종료문구까지 통째로 자름
-# - 표보다 '본문형 설명'을 최대한 살리기 위한 1순위 로직
+# - 네가 말한 "original 버전"을 무조건 1순위(default)로 사용
 def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: str) -> str:
     corpus = _option_corpus_from_tables(tables)
     if not corpus:
         return ""
 
-    option_section = _slice_option_major_section(corpus)
+    search_space = _slice_option_major_section(corpus)
+    if not search_space:
+        search_space = corpus
 
-    if option_type == "put":
-        header_patterns = [
-            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"사채권자의\s*조기상환청구권.*?에\s*관한\s*사항",
-        ]
-        anchor_patterns = [
-            r"본\s*사채의\s*사채권자는",
-            r"사채권자는\s*본\s*사채의\s*발행일로부터",
-            r"조기상환을\s*청구할\s*수\s*있",
-        ]
-        end_patterns = [
-            r"지급하여야\s*한다\.?",
-            r"지급하여야\s*합니다\.?",
-            r"지급하여야한다\.?",
-        ]
-        bad_near_patterns = [
-            r"\(주\d+\)",
-            r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)",
-            r"매도청구권\s*\(\s*Call\s*Option\s*\)",
-            r"구분\s*조기상환\s*청구기간",
-            r"From\s*To",
+    option_key = (option_type or "").strip().lower()
+    if option_key not in ("put", "call"):
+        return ""
+
+    primary_rules = {
+        "put": {
+            "headers": [
+                r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+                r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            ],
+            "anchors": [
+                r"본\s*사채의\s*사채권자는",
+                r"조기상환을\s*청구할\s*수\s*있",
+            ],
+            "end_patterns": [
+                r"지급하여야\s*한다\.?",
+            ],
+        },
+        "call": {
+            "headers": [
+                r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+                r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            ],
+            "anchors": [
+                r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
+                r"매도청구권을\s*행사",
+            ],
+            "end_patterns": [
+                r"매도하여야\s*한다\.?",
+            ],
+        },
+    }
+
+    fallback_rules = {
+        "put": {
+            "headers": [
+                r"\[\s*Put\s*Option\s*에\s*관한\s*사항\s*\]",
+                r"Put\s*Option\s*에\s*관한\s*사항",
+                r"가\.\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"1\.\s*사채권자\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)",
+                r"1\)\s*사채의\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"사채의\s*만기전\s*조기상환청구권\s*\(\s*Put[\-\s]*Option\s*\)",
+                r"조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항",
+            ],
+            "anchors": [
+                r"사채권자는",
+                r"인수인은",
+                r"조기상환청구권",
+                r"조기상환을\s*청구",
+                r"중도상환을\s*요구할\s*수\s*없다",
+            ],
+            "end_patterns": [
+                r"지급하여야\s*한다\.?",
+                r"상환하고\s*조기상환지급기일\s*이후의\s*이자는\s*계산하지\s*아니한다\.?",
+                r"상환하고\s*조기상환일\s*이후의\s*이자는\s*계산하지\s*아니한다\.?",
+                r"요구할\s*수\s*없다\.?",
+            ],
+        },
+        "call": {
+            "headers": [
+                r"\[\s*Call\s*option\s*에\s*관한\s*사항\s*\]",
+                r"Call\s*option\s*에\s*관한\s*사항",
+                r"나\.\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"나\.\s*매도청구권\s*\(\s*Call\s*option\s*\)\s*에\s*관한\s*사항",
+                r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+                r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"2\)\s*발행회사의\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+                r"3\.\s*발행회사\s*매도청구권\s*\(\s*Call\s*Option\s*\)",
+                r"콜옵션에\s*관한\s*사항",
+            ],
+            "anchors": [
+                r"발행회사",
+                r"발행회사가\s*지정하는\s*자",
+                r"매도청구권",
+                r"중도상환청구권",
+                r"매수인에게\s*매도하여야\s*한다",
+            ],
+            "end_patterns": [
+                r"매도하여야\s*한다\.?",
+                r"행사를\s*보장하지\s*않는다\.?",
+                r"중도상환지급기일\s*이후의\s*이자는\s*계산하지\s*아니한다\.?",
+            ],
+        },
+    }
+
+    if option_key == "put":
+        opposite_patterns = [
+            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"콜옵션에\s*관한\s*사항",
+            r"Call\s*Option",
         ]
     else:
-        header_patterns = [
-            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"발행회사의\s*매도청구권.*?에\s*관한\s*사항",
+        opposite_patterns = [
+            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"가\.\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"Put\s*Option",
+            r"풋옵션",
         ]
-        anchor_patterns = [
-            r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
-            r"발행회사[는가]?",
-            r"매도청구권을\s*행사",
-            r"매도하여야\s*한다",
-        ]
-        end_patterns = [
-            r"매도하여야\s*한다\.?",
-            r"매도하여야\s*합니다\.?",
-            r"매도하여야한다\.?",
-        ]
-        bad_near_patterns = [
-            r"\(주\d+\)",
-            r"구분\s*매도청구권\s*행사기간",
-            r"From\s*To",
-        ]
+
+    common_boundary_patterns = [
+        r"\n\s*【[^】]+】",
+        r"\n\s*\[[^\]]+\]",
+        #r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
+        #r"\n\s*[가-하]\.\s*[가-힣A-Za-z]",
+        r"【\s*특정인에\s*대한\s*대상자별\s*사채발행내역\s*】",
+        r"\[\s*특정인에\s*대한\s*대상자별\s*사채발행내역\s*\]",
+        r"【\s*사채발행\s*대상\s*법인\s*또는\s*단체가\s*권리\s*행사로\s*주주가\s*되는\s*경우\s*】",
+        r"\[\s*사채발행\s*대상\s*법인\s*또는\s*단체가\s*권리\s*행사로\s*주주가\s*되는\s*경우\s*\]",
+        r"【\s*조달자금의\s*구체적\s*사용\s*목적\s*】",
+        r"\[\s*조달자금의\s*구체적\s*사용\s*목적\s*\]",
+        r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
+    ]
+
+    noise_patterns = [
+        r"구분\s*조기상환\s*청구기간",
+        r"구분\s*매도청구권\s*행사기간",
+        r"From\s*To",
+        r"시작일\s*종료일",
+        r"\(주\d+\)",
+    ]
+
+    def _first_anchor_pos(text: str, patterns: List[str], limit: int) -> int:
+        best = -1
+        for pat in patterns:
+            m = re.search(pat, text[:limit], flags=re.I)
+            if m:
+                if best == -1 or m.start() < best:
+                    best = m.start()
+        return best
+
+    def _collect_candidates(rule_pack: Dict[str, List[str]], base_score: int, strict_anchor: bool) -> List[Tuple[int, str]]:
+        out = []
+
+        for hpat in rule_pack["headers"]:
+            for hm in re.finditer(hpat, search_space, flags=re.I):
+                start = hm.start()
+                tail = search_space[start:start + 5000]
+
+                head_250 = tail[:250]
+                head_500 = tail[:500]
+
+                anchor_250 = _first_anchor_pos(head_250, rule_pack["anchors"], 250)
+                anchor_500 = _first_anchor_pos(head_500, rule_pack["anchors"], 500)
+
+                if strict_anchor and anchor_250 == -1:
+                    continue
+
+                score = base_score
+
+                if anchor_250 != -1:
+                    score += 300
+                    anchor_pos = anchor_250
+                elif anchor_500 != -1:
+                    score += 120
+                    anchor_pos = anchor_500
+                else:
+                    score -= 220
+                    anchor_pos = 0
+
+                for npat in noise_patterns:
+                    if re.search(npat, head_250, flags=re.I):
+                        score -= 90
+
+                end_pos = _find_earliest_end(tail, rule_pack["end_patterns"], start_pos=max(anchor_pos, 0))
+                if end_pos != -1:
+                    score += 60
+                else:
+                    boundary_pos = _find_earliest_boundary(
+                        tail,
+                        opposite_patterns + common_boundary_patterns,
+                        start_pos=max(anchor_pos + 20, 20),
+                    )
+                    if boundary_pos != -1:
+                        end_pos = boundary_pos
+                        score += 20
+                    else:
+                        end_pos = min(len(tail), 1800)
+
+                candidate = tail[:end_pos].strip()
+                candidate = _cleanup_option_result(candidate)
+
+                if len(candidate) < 40:
+                    continue
+
+                cand_norm = _norm(candidate)
+
+                if option_key == "put":
+                    if "매도청구권" in cand_norm and "조기상환청구권" not in cand_norm and "putoption" not in cand_norm:
+                        score -= 500
+                else:
+                    if "조기상환청구권" in cand_norm and "매도청구권" not in cand_norm and "calloption" not in cand_norm:
+                        score -= 500
+
+                if len(candidate) > 1200:
+                    score -= (len(candidate) - 1200) // 8
+
+                out.append((score, candidate))
+
+        return out
 
     candidates = []
-
-    for pat in header_patterns:
-        for m in re.finditer(pat, option_section, flags=re.I):
-            start = m.start()
-            tail = option_section[start:start + 4000]
-
-            head_window = tail[:250]
-            if not any(re.search(ap, head_window, flags=re.I) for ap in anchor_patterns):
-                continue
-
-            penalty = 0
-            if any(re.search(bp, head_window, flags=re.I) for bp in bad_near_patterns):
-                penalty += 150
-
-            end_pos = _find_earliest_end(tail, end_patterns)
-            if end_pos == -1:
-                continue
-
-            candidate = tail[:end_pos]
-            score = 1000
-            score -= max(0, len(candidate) - 800) // 5
-
-            if re.search(r"구분\s*조기상환\s*청구기간", candidate, flags=re.I):
-                score -= 300
-            if re.search(r"구분\s*매도청구권\s*행사기간", candidate, flags=re.I):
-                score -= 300
-            if re.search(r"From\s*To", candidate, flags=re.I):
-                score -= 300
-            if re.search(r"\(주\d+\)", candidate, flags=re.I):
-                score -= 100
-
-            score -= penalty
-            candidates.append((score, candidate))
+    candidates.extend(_collect_candidates(primary_rules[option_key], base_score=1000, strict_anchor=True))
+    candidates.extend(_collect_candidates(fallback_rules[option_key], base_score=700, strict_anchor=False))
 
     if not candidates:
         return ""
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
     best = candidates[0][1]
     return _cleanup_option_result(best)
 
@@ -2095,7 +2289,8 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
     return ratio, ytc
 
-# [정규식 패턴 중 가5장 먼저 나오는 매치 찾기]
+
+# [정규식 패턴 중 가장 먼저 나오는 매치 찾기]
 def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
     best = None
     for pat in patterns:
@@ -2262,6 +2457,7 @@ def choose_best_option_value(option_type: str, *candidates: str) -> str:
 
     return best
 
+
 # [옵션 1차 추출]
 # - "원래 방식" 우선:
 #   1) corr_after / 라벨-값 구조에서 직접 추출
@@ -2283,6 +2479,12 @@ def extract_option_value_primary(
             "조기상환청구권",
             "Put Option",
             "풋옵션",
+            "사채권자 조기상환청구권(Put Option)",
+            "사채권자 조기상환청구권 (Put Option)",
+            "사채의 만기전 조기상환청구권(Put-Option)",
+            "사채의 만기전 조기상환청구권 (Put-Option)",
+            "만기전 조기상환청구권",
+            "조기상환권",
         ]
         opposite_markers = ["매도청구권", "Call Option", "콜옵션"]
     else:
@@ -2296,6 +2498,14 @@ def extract_option_value_primary(
             "매도청구권",
             "Call Option",
             "콜옵션",
+            "중도상환청구권(Call Option)에 관한 사항",
+            "중도상환청구권 (Call Option)에 관한 사항",
+            "발행회사의 중도상환청구권(Call Option)에 관한 사항",
+            "발행회사의 중도상환청구권 (Call Option)에 관한 사항",
+            "발행회사 매도청구권(Call Option)",
+            "발행회사 매도청구권 (Call Option)",
+            "콜옵션에 관한 사항",
+            "중도상환청구권",
         ]
         opposite_markers = ["조기상환청구권", "Put Option", "풋옵션"]
 
@@ -2795,22 +3005,31 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
-    put_fallback_val = extract_option_section_from_tables(tables, "put") or extract_option_details_from_tables(tables, "put")
+    #0930에 2995~3019 고침
+    put_section_val = extract_option_section_from_tables(tables, "put")
     put_primary_val = extract_option_value_primary(tables, corr_after, "put")
     put_anchor_val = extract_option_block_by_anchor_range(tables, "put")
-    row["Put Option"] = first_nonempty(
-        put_fallback_val,
+    put_detail_val = extract_option_details_from_tables(tables, "put")
+    
+    row["Put Option"] = choose_best_option_value(
+        "put",
+        put_section_val,
         put_primary_val,
         put_anchor_val,
+        put_detail_val,
     )
     
-    call_fallback_val = extract_option_section_from_tables(tables, "call") or extract_option_details_from_tables(tables, "call")
+    call_section_val = extract_option_section_from_tables(tables, "call")
     call_primary_val = extract_option_value_primary(tables, corr_after, "call")
     call_anchor_val = extract_option_block_by_anchor_range(tables, "call")
-    row["Call Option"] = first_nonempty(
-        call_fallback_val,
+    call_detail_val = extract_option_details_from_tables(tables, "call")
+    
+    row["Call Option"] = choose_best_option_value(
+        "call",
+        call_section_val,
         call_primary_val,
         call_anchor_val,
+        call_detail_val,
     )
 
     row["Call 비율"] = clean_percent(scan_label_value_preferring_correction(
