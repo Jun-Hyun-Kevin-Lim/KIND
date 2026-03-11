@@ -2343,9 +2343,9 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
             r"콜옵션",
         ]
         stop_patterns = [
-            r"\n\s*\d+\s*-\s*\d+\s*\.",
-            r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
-            r"\n\s*[가-하]\.\s*[가-힣A-Za-z]",
+            #r"\n\s*\d+\s*-\s*\d+\s*\.",
+            #r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
+            #r"\n\s*[가-하]\.\s*[가-힣A-Za-z]",
             r"\n\s*기타\s*투자판단에\s*참고할\s*사항",
             r"\n\s*기타사항",
             r"\n\s*합병\s*관련\s*사항",
@@ -2581,16 +2581,13 @@ def extract_option_value_primary(
             return True
 
         return False
-
+        
     def _is_new_heading(text: str) -> bool:
         raw = normalize_text(text)
         if not raw:
             return False
-
-        return (
-            bool(re.match(r"^(가|나|다|라|마|바)\.\s*", raw)) or
-            bool(re.match(r"^\d+\s*[\.\)]\s*", raw))
-        )
+    
+        return bool(re.match(r"^\d+\s*-\s*\d+\s*[\.\)]", raw))
 
     direct = scan_label_value_preferring_correction(dfs, label_candidates, corr_after)
     direct = _clean_option_text(direct)
