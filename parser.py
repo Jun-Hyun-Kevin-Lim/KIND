@@ -11,7 +11,7 @@ import pandas as pd
 # ==========================================================
 # [환경변수 / 시트명 설정]
 # - Google Sheets 접속용 ID / Credentials 로드
-# - RAW / 유상증자 / 주식연계채권 / parse_log 시트명 설정
+# - RAW / 유상증자 / 주식연계채권 시트명 설정
 # - 특정 접수번호만 테스트할 때 RUN_ONLY_ACPTNO 사용
 # ==========================================================
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
@@ -23,7 +23,6 @@ GOOGLE_CREDENTIALS_JSON = (
 RAW_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_dump")
 RIGHTS_SHEET_NAME = os.getenv("RIGHTS_SHEET_NAME", "유상증자")
 BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "주식연계채권")
-PARSE_LOG_SHEET_NAME = os.getenv("PARSE_LOG_SHEET_NAME", "parse_log")
 
 RUN_ONLY_ACPTNO = os.getenv("RUN_ONLY_ACPTNO", "").strip()
 
@@ -90,22 +89,6 @@ BOND_HEADERS = [
     "투자자",
     "링크",
     "접수번호",
-]
-
-
-# ==========================================================
-# [파싱 로그 시트 헤더]
-# - 어떤 접수번호가 어떤 시트로 갔는지
-# - 누락 컬럼 / 의심 컬럼 / 처리 상태 기록용
-# ==========================================================
-PARSE_LOG_HEADERS = [
-    "접수번호",
-    "보고서명",
-    "대상시트",
-    "상태",
-    "누락컬럼",
-    "의심컬럼",
-    "처리시각",
 ]
 
 
@@ -1250,6 +1233,7 @@ def get_prev_shares_sum(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) -> 
 
     return None
 
+
 # [기준주가 추출]
 # - 기준주가 / 기준발행가액 섹션만 정밀하게 읽음
 # - 확정발행가나 날짜 숫자가 섞여 들어오는 문제를 최대한 방지
@@ -1353,6 +1337,7 @@ def get_base_price_by_exact_section(
                     return max(vals)
 
     return None
+
 
 # [확정/예정 발행가 추출]
 # - 유상증자 공시에서 "6. 신주 발행가액" 섹션을 최우선으로 읽음
@@ -2221,7 +2206,6 @@ def _slice_option_major_section(corpus: str) -> str:
         r"\n\s*25\s*[\.\)]",
         r"\n\s*【",
         r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
-        # r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
     ]
     sections = []
 
@@ -2419,8 +2403,6 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
     common_boundary_patterns = [
         r"\n\s*【[^】]+】",
         r"\n\s*\[[^\]]+\]",
-        # r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
-        # r"\n\s*[가-하]\.\s*[가-힣A-Za-z]",
         r"【\s*특정인에\s*대한\s*대상자별\s*사채발행내역\s*】",
         r"\[\s*특정인에\s*대한\s*대상자별\s*사채발행내역\s*\]",
         r"【\s*사채발행\s*대상\s*법인\s*또는\s*단체가\s*권리\s*행사로\s*주주가\s*되는\s*경우\s*】",
@@ -2732,9 +2714,6 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
             r"콜옵션",
         ]
         stop_patterns = [
-            # r"\n\s*\d+\s*-\s*\d+\s*\.",
-            # r"\n\s*\d+\s*[\.\)]\s*[가-힣A-Za-z]",
-            # r"\n\s*[가-하]\.\s*[가-힣A-Za-z]",
             r"\n\s*기타\s*투자판단에\s*참고할\s*사항",
             r"\n\s*기타사항",
             r"\n\s*합병\s*관련\s*사항",
@@ -3430,7 +3409,6 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
-    # 0930에 2995~3019 고침
     put_section_val = extract_option_section_from_tables(tables, "put")
     put_primary_val = extract_option_value_primary(tables, corr_after, "put")
     put_anchor_val = extract_option_block_by_anchor_range(tables, "put")
@@ -3586,51 +3564,22 @@ def upsert_structured_row(
 
 
 # ==========================================================
-# Logging / Runner
+# Runner
 # ==========================================================
-# [parse_log 기록]
-# - 처리 상태 / 누락 컬럼 / 의심 컬럼을 parse_log 시트에 append
-def write_parse_log(
-    log_ws,
-    acpt_no: str,
-    title: str,
-    target_sheet: str,
-    status: str,
-    missing: List[str],
-    suspicious: Optional[List[str]] = None,
-):
-    suspicious = suspicious or []
-    log_ws.append_row(
-        [
-            acpt_no,
-            title,
-            target_sheet,
-            status,
-            ", ".join(missing),
-            ", ".join(suspicious),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        ],
-        value_input_option="RAW",
-    )
-
-
 # [메인 실행 함수]
 # - 시트 오픈 / 헤더 보장
 # - RAW_dump 레코드 로드
 # - 공시 타입별 parser 실행
 # - 결과를 rights / bond 시트에 upsert
-# - 처리 로그를 parse_log에 기록
 def run_parser():
     sh = gs_open()
 
     raw_ws = ensure_ws(sh, RAW_SHEET_NAME, rows=5000, cols=250)
     rights_ws = ensure_ws(sh, RIGHTS_SHEET_NAME, rows=3000, cols=max(40, len(RIGHTS_HEADERS) + 5))
     bond_ws = ensure_ws(sh, BOND_SHEET_NAME, rows=3000, cols=max(40, len(BOND_HEADERS) + 5))
-    log_ws = ensure_ws(sh, PARSE_LOG_SHEET_NAME, rows=3000, cols=max(20, len(PARSE_LOG_HEADERS) + 5))
 
     ensure_header(rights_ws, RIGHTS_HEADERS)
     ensure_header(bond_ws, BOND_HEADERS)
-    ensure_header(log_ws, PARSE_LOG_HEADERS)
 
     records = load_raw_records(raw_ws)
     if RUN_ONLY_ACPTNO:
@@ -3652,7 +3601,6 @@ def run_parser():
             if "유상증자결정" in title.replace(" ", ""):
                 row, missing, suspicious = parse_rights_record(rec)
                 mode, rownum = upsert_structured_row(rights_ws, RIGHTS_HEADERS, row, "rights")
-                write_parse_log(log_ws, acpt_no, title, RIGHTS_SHEET_NAME, f"OK:{mode}", missing, suspicious)
                 ok += 1
                 print(f"[OK][RIGHTS][{mode}] {acpt_no} {title}")
 
@@ -3666,17 +3614,14 @@ def run_parser():
             ):
                 row, missing, suspicious = parse_bond_record(rec)
                 mode, rownum = upsert_structured_row(bond_ws, BOND_HEADERS, row, "bond")
-                write_parse_log(log_ws, acpt_no, title, BOND_SHEET_NAME, f"OK:{mode}", missing, suspicious)
                 ok += 1
                 print(f"[OK][BOND][{mode}] {acpt_no} {title}")
 
             else:
-                write_parse_log(log_ws, acpt_no, title, "", "SKIP", [], [])
                 skip += 1
                 print(f"[SKIP] {acpt_no} {title}")
 
         except Exception as e:
-            write_parse_log(log_ws, acpt_no, title, "", f"FAIL: {e}", [], [])
             fail += 1
             print(f"[FAIL] {acpt_no} {title} :: {e}")
 
