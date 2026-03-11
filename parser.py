@@ -3234,6 +3234,15 @@ def run_parser():
 
     print(f"[DONE] ok={ok} skip={skip} fail={fail}")
 
+    return {
+        "rights_added": rights_added,
+        "bond_added": bond_added,
+        "total_added": rights_added + bond_added,
+        "error_count": fail,
+        "ok": ok,
+        "skip": skip,
+        "fail": fail,
+    }
 
 # [직접 실행 진입점]
 if __name__ == "__main__":
