@@ -1278,6 +1278,199 @@ def get_price_by_exact_section(dfs: List[pd.DataFrame], corr_after: Dict[str, st
     return None
 
 
+# ==========================================================
+# [수정 추가] 정정공시 전용 / exact section 전용 helper
+# ==========================================================
+def _extract_valid_price_candidates(text: Any) -> List[int]:
+    if not text:
+        return []
+
+    txt = str(text)
+    txt = re.sub(r'202\d[년월일\.]?', '', txt)
+    txt = re.sub(r'\d+(?:\.\d+)?%', '', txt)
+    txt = re.sub(r'^([①-⑩]|\(\d+\)|\d+\.)+', '', txt)
+
+    nums = re.findall(
+        r"(?<![\d.])\d{1,3}(?:,\d{3})*(?:\.\d+)?(?![\d.])|(?<![\d.])\d+(?:\.\d+)?(?![\d.])",
+        txt
+    )
+
+    vals = []
+    for x in nums:
+        try:
+            val = int(float(x.replace(",", "")))
+            if val >= 50 and val not in [2024, 2025, 2026, 2027]:
+                vals.append(val)
+        except Exception:
+            pass
+    return vals
+
+
+# [수정 추가] 정정공시 전용 - 확정발행가(원)은 정정후 값만 사용
+def get_price_from_correction_after(corr_after: Dict[str, str]) -> Optional[int]:
+    if not corr_after:
+        return None
+
+    target_keys = [
+        "6신주발행가액",
+        "6신주의발행가액",
+        "61주당신주발행가액",
+        "6발행가액",
+        "신주발행가액",
+        "신주의발행가액",
+        "예정발행가액",
+        "확정발행가액",
+        "1주당확정발행가액",
+        "발행가액",
+    ]
+    stop_keys = [
+        "기준", "할인", "할증", "증자전", "주식수",
+        "납입", "방법", "산정", "일정", "발행목적"
+    ]
+
+    for k, v in corr_after.items():
+        k_norm = _norm(k)
+        if any(t in k_norm for t in target_keys) and not any(s in k_norm for s in stop_keys):
+            vals = _extract_valid_price_candidates(v)
+            if vals:
+                return max(vals)
+
+    return None
+
+
+# [수정 추가] 정정공시 전용 - 기준주가는 정정후 값만 사용
+def get_base_price_from_correction_after(corr_after: Dict[str, str]) -> Optional[int]:
+    if not corr_after:
+        return None
+
+    target_keys = [
+        "7기준주가",
+        "7기준발행가액",
+        "기준주가",
+        "기준발행가액",
+    ]
+
+    for k, v in corr_after.items():
+        k_norm = _norm(k)
+        if any(t in k_norm for t in target_keys):
+            vals = _extract_valid_price_candidates(v)
+            if vals:
+                return max(vals)
+
+    return None
+
+
+# [수정 추가] 증자전 주식수는 반드시 "3. 증자전 발행주식총수 (주)" 섹션에서만 추출
+# - 정정공시일 때 correction_only=True 이면 정정후 값만 보고 끝냄
+def get_prev_shares_sum_by_exact_section(
+    dfs: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+    correction_only: bool = False
+) -> Optional[int]:
+    def _first_nonempty_cell(row_vals) -> str:
+        for x in row_vals:
+            s = normalize_text(x)
+            if s:
+                return s
+        return ""
+
+    def _is_section3_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        n = _norm(raw)
+        if not raw:
+            return False
+
+        patterns = [
+            r"^3[\.\)]?증자전발행주식총수\(주\)$",
+            r"^3[\.\)]?증자전발행주식총수$",
+        ]
+        if any(re.match(p, n) for p in patterns):
+            return True
+
+        if re.match(r"^3[\.\)]?증자전발행주식총수", n):
+            return True
+
+        return False
+
+    def _is_new_top_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+        return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
+
+    # 1순위: 정정공시는 반드시 corr_after의 해당 항목만 사용
+    if corr_after:
+        for k, v in corr_after.items():
+            if _is_section3_heading(k):
+                cv, ov, tv = parse_shares_from_text(str(v))
+                calc = cv + ov
+
+                if tv > 0 and tv >= calc:
+                    return tv
+                if calc > 0:
+                    return calc
+                if cv > 0:
+                    return cv
+                if ov > 0:
+                    return ov
+
+                fallback = _max_int_in_text(v)
+                if fallback and fallback > 50:
+                    return fallback
+
+    if correction_only:
+        return None
+
+    # 2순위: 일반 공시는 실제 표에서 "3. 증자전 발행주식총수 (주)" 섹션만 읽음
+    for df in dfs:
+        try:
+            arr = df.astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
+
+        for r in range(R):
+            row_list = arr[r].tolist()
+            first_cell = _first_nonempty_cell(row_list)
+            row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
+
+            if _is_section3_heading(first_cell) or _is_section3_heading(row_join):
+                block_texts = []
+
+                for rr in range(r, min(r + 6, R)):
+                    next_row_list = arr[rr].tolist()
+                    next_first = _first_nonempty_cell(next_row_list)
+                    next_join = " ".join([normalize_text(x) for x in next_row_list if normalize_text(x)])
+
+                    if not next_join:
+                        continue
+
+                    if rr > r and _is_new_top_heading(next_first):
+                        break
+
+                    block_texts.append(next_join)
+
+                block_text = " ".join(block_texts)
+                cv, ov, tv = parse_shares_from_text(block_text)
+                calc = cv + ov
+
+                if tv > 0 and tv >= calc:
+                    return tv
+                if calc > 0:
+                    return calc
+                if cv > 0:
+                    return cv
+                if ov > 0:
+                    return ov
+
+                fallback = _max_int_in_text(block_text)
+                if fallback and fallback > 50:
+                    return fallback
+
+    return None
+
+
 # [자금용도 + 자금합계 추출]
 # - 운영자금 / 채무상환자금 등 6개 카테고리 읽기
 # - 자금용도 텍스트와 합산 금액(won)을 함께 반환
@@ -2770,7 +2963,8 @@ def extract_period_dates_from_tables(
 def parse_rights_record(rec: Dict[str, Any]):
     title = clean_title(rec["title"])
     tables = rec["tables"]
-    corr_after = extract_correction_after_map(tables) if is_correction_title(title) else {}
+    is_corr = is_correction_title(title)
+    corr_after = extract_correction_after_map(tables) if is_corr else {}
 
     row = {h: "" for h in RIGHTS_HEADERS}
     missing = []
@@ -2816,30 +3010,42 @@ def parse_rights_record(rec: Dict[str, Any]):
     if issue_type:
         row["발행상품"] = issue_type
 
-    prev_shares = get_prev_shares_sum(tables, corr_after)
-    if not prev_shares:
-        prev_shares = _max_int_in_text(scan_label_value_preferring_correction(
-            tables,
-            [
-                "증자전발행주식총수", "기발행주식총수", "발행주식총수",
-                "증자전 주식수", "증자전발행주식총수(보통주식)"
-            ],
-            corr_after
-        )) or find_row_best_int(tables, ["증자전발행주식총수", "보통주식"], 50) or find_row_best_int(tables, ["발행주식총수", "보통주식"], 50)
+    # [수정] 증자전 주식수는 반드시 "3. 증자전 발행주식총수 (주)" 기준
+    # 정정공시는 corr_after의 정정후 값만 사용
+    prev_shares = get_prev_shares_sum_by_exact_section(
+        tables,
+        corr_after,
+        correction_only=is_corr
+    )
     if prev_shares:
         row["증자전 주식수"] = fmt_number(prev_shares)
 
-    price = get_price_by_exact_section(tables, corr_after)
-    if not price:
-        price = _max_int_in_text(scan_label_value_preferring_correction(
-            tables,
-            ["신주 발행가액", "신주발행가액", "예정발행가액", "확정발행가액", "발행가액", "1주당 확정발행가액"],
-            corr_after
-        )) or find_row_best_int(tables, ["신주발행가액", "보통주식"], 50) or find_row_best_int(tables, ["예정발행가액"], 50) or find_row_best_int(tables, ["발행가액", "원"], 50)
+    # [수정] 정정공시는 확정발행가를 정정후 값에서만 사용
+    if is_corr:
+        price = get_price_from_correction_after(corr_after)
+    else:
+        price = get_price_by_exact_section(tables, corr_after)
+        if not price:
+            price = (
+                _max_int_in_text(scan_label_value_preferring_correction(
+                    tables,
+                    ["신주 발행가액", "신주발행가액", "예정발행가액", "확정발행가액", "발행가액", "1주당 확정발행가액"],
+                    corr_after
+                ))
+                or find_row_best_int(tables, ["신주발행가액", "보통주식"], 50)
+                or find_row_best_int(tables, ["예정발행가액"], 50)
+                or find_row_best_int(tables, ["발행가액", "원"], 50)
+            )
+
     if price and price > 50:
         row["확정발행가(원)"] = fmt_number(price)
 
-    base_price = get_base_price_by_exact_section(tables, corr_after)
+    # [수정] 정정공시는 기준주가를 정정후 값에서만 사용
+    if is_corr:
+        base_price = get_base_price_from_correction_after(corr_after)
+    else:
+        base_price = get_base_price_by_exact_section(tables, corr_after)
+
     if base_price and base_price > 50:
         row["기준주가"] = fmt_number(base_price)
 
