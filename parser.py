@@ -627,6 +627,10 @@ def find_numeric_value_by_keywords(pairs: List[Tuple[str, str]], keywords: List[
 def extract_correction_after_map(dfs: List[pd.DataFrame]) -> Dict[str, str]:
     out: Dict[str, str] = {}
 
+    def _is_invalid_corr_value(v: Any) -> bool:
+        nv = _norm(v)
+        return nv in ("", "정정후", "정정전", "항목", "변경사유", "정정사유", "-")
+
     for df in dfs:
         try:
             arr = df.astype(str).values
@@ -669,14 +673,40 @@ def extract_correction_after_map(dfs: List[pd.DataFrame]) -> Dict[str, str]:
 
             last_item = item
             after_val = ""
+
+            # -------------------------------
+            # [기존 로직] 정정후 컬럼에서 직접 읽기
+            # -------------------------------
             if 0 <= after_col < C:
                 v = str(arr[rr][after_col]).strip()
                 if (
                     v
                     and v.lower() != "nan"
-                    and _norm(v) not in ("정정후", "정정전", "항목", "변경사유", "정정사유", "-")
+                    and not _is_invalid_corr_value(v)
                 ):
                     after_val = _single_line(v)
+
+            # -------------------------------
+            # [추가 fallback]
+            # 정정후 칸이 비어 있는데 값이 한 칸 밀린 경우 복구
+            # 예:
+            # 항목 | 정정사유 | 정정전 | 정정후
+            # 6. 신주 발행가액 | 2,849 | 2,374 | ""
+            # -> 마지막 값 2,374를 정정후로 간주
+            # -------------------------------
+            if not after_val:
+                tail_vals = []
+                for cc in range((item_col or 0) + 1, C):
+                    v = str(arr[rr][cc]).strip()
+                    if (
+                        v
+                        and v.lower() != "nan"
+                        and not _is_invalid_corr_value(v)
+                    ):
+                        tail_vals.append(_single_line(v))
+
+                if len(tail_vals) >= 2:
+                    after_val = tail_vals[-1]
 
             if after_val:
                 out[_norm(item)] = after_val
