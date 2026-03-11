@@ -1,9 +1,8 @@
-# validator.py
 import os
 import json
 import re
-from datetime import datetime
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Set, Tuple
 
 import gspread
 
@@ -16,8 +15,9 @@ GOOGLE_CREDENTIALS_JSON = (
 
 RIGHTS_SHEET_NAME = os.getenv("RIGHTS_SHEET_NAME", "유상증자")
 BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "주식연계채권")
+SEEN_SHEET_NAME = os.getenv("SEEN_SHEET_NAME", "seen")
 REVIEW_SHEET_NAME = os.getenv("REVIEW_SHEET_NAME", "review_queue")
-
+REVIEW_LOOKBACK_MINUTES = int(os.getenv("REVIEW_LOOKBACK_MINUTES", "20"))
 
 REVIEW_HEADERS = [
     "접수번호",
@@ -83,13 +83,16 @@ def _norm_date(s: Any) -> str:
     return re.sub(r"[^\d]", "", str(s or ""))
 
 
-def get_records(ws) -> List[Dict[str, str]]:
-    values = ws.get_all_records()
-    out = []
-    for row in values:
-        clean_row = {str(k): normalize_text(v) for k, v in row.items()}
-        out.append(clean_row)
-    return out
+def parse_dt(s: str):
+    s = normalize_text(s)
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y.%m.%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    return None
 
 
 def add_flag(flags: List[str], level: str, field: str, reason: str, value: Any = ""):
@@ -107,6 +110,53 @@ def judge_level(flags: List[str]) -> str:
     if any(x.startswith("HIGH|") for x in flags):
         return "REVIEW_HIGH"
     return "REVIEW"
+
+
+def get_recent_acptnos_from_seen(seen_ws, lookback_minutes: int) -> Set[str]:
+    values = seen_ws.get_all_values()
+    if not values:
+        return set()
+
+    cutoff = datetime.now() - timedelta(minutes=lookback_minutes)
+    recent: Set[str] = set()
+
+    for row in values[1:]:
+        acpt_no = row[0].strip() if len(row) > 0 else ""
+        processed_at = row[2].strip() if len(row) > 2 else ""
+
+        if not acpt_no.isdigit():
+            continue
+
+        dt = parse_dt(processed_at)
+        if not dt:
+            continue
+
+        if dt >= cutoff:
+            recent.add(acpt_no)
+
+    return recent
+
+
+def get_sheet_records_by_acpt(ws, target_acptnos: Set[str]) -> List[Dict[str, str]]:
+    all_rows = ws.get_all_records()
+    out = []
+    for row in all_rows:
+        clean_row = {str(k): normalize_text(v) for k, v in row.items()}
+        if clean_row.get("접수번호", "") in target_acptnos:
+            out.append(clean_row)
+    return out
+
+
+def get_existing_review_keys(review_ws) -> Set[Tuple[str, str, str]]:
+    vals = review_ws.get_all_records()
+    keys = set()
+    for row in vals:
+        acpt = normalize_text(row.get("접수번호", ""))
+        sheet_name = normalize_text(row.get("대상시트", ""))
+        reason = normalize_text(row.get("의심사유", ""))
+        if acpt and sheet_name and reason:
+            keys.add((acpt, sheet_name, reason))
+    return keys
 
 
 def validate_rights_row(row: Dict[str, str]) -> List[str]:
@@ -262,7 +312,7 @@ def validate_bond_row(row: Dict[str, str]) -> List[str]:
     return flags
 
 
-def build_review_rows(sheet_name: str, records: List[Dict[str, str]]) -> List[List[str]]:
+def build_review_rows(sheet_name: str, records: List[Dict[str, str]], existing_keys: Set[Tuple[str, str, str]]) -> List[List[str]]:
     rows: List[List[str]] = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -275,13 +325,18 @@ def build_review_rows(sheet_name: str, records: List[Dict[str, str]]) -> List[Li
         if not flags:
             continue
 
+        reason = " || ".join(flags)
+        key = (row.get("접수번호", ""), sheet_name, reason)
+        if key in existing_keys:
+            continue
+
         rows.append([
             row.get("접수번호", ""),
             sheet_name,
             row.get("회사명", ""),
             row.get("보고서명", ""),
             judge_level(flags),
-            " || ".join(flags),
+            reason,
             row.get("링크", ""),
             now,
         ])
@@ -289,39 +344,35 @@ def build_review_rows(sheet_name: str, records: List[Dict[str, str]]) -> List[Li
     return rows
 
 
-def dedupe_review_rows(rows: List[List[str]]) -> List[List[str]]:
-    seen = set()
-    out = []
-    for r in rows:
-        key = (r[0], r[1], r[4], r[5])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(r)
-    return out
-
-
 def run_validator():
     sh = gs_open()
 
+    seen_ws = ensure_ws(sh, SEEN_SHEET_NAME, rows=2000, cols=5)
     rights_ws = ensure_ws(sh, RIGHTS_SHEET_NAME, rows=3000, cols=50)
     bond_ws = ensure_ws(sh, BOND_SHEET_NAME, rows=3000, cols=50)
     review_ws = ensure_ws(sh, REVIEW_SHEET_NAME, rows=5000, cols=20)
 
     ensure_header(review_ws, REVIEW_HEADERS)
 
-    rights_records = get_records(rights_ws)
-    bond_records = get_records(bond_ws)
+    recent_acptnos = get_recent_acptnos_from_seen(seen_ws, REVIEW_LOOKBACK_MINUTES)
+
+    if not recent_acptnos:
+        print("[INFO] 최근 유입된 접수번호가 없어 validator 종료")
+        return
+
+    rights_records = get_sheet_records_by_acpt(rights_ws, recent_acptnos)
+    bond_records = get_sheet_records_by_acpt(bond_ws, recent_acptnos)
+    existing_keys = get_existing_review_keys(review_ws)
 
     rows = []
-    rows.extend(build_review_rows(RIGHTS_SHEET_NAME, rights_records))
-    rows.extend(build_review_rows(BOND_SHEET_NAME, bond_records))
-    rows = dedupe_review_rows(rows)
+    rows.extend(build_review_rows(RIGHTS_SHEET_NAME, rights_records, existing_keys))
+    rows.extend(build_review_rows(BOND_SHEET_NAME, bond_records, existing_keys))
 
-    review_ws.clear()
-    review_ws.update("A1", [REVIEW_HEADERS] + rows)
-
-    print(f"[DONE] review_rows={len(rows)}")
+    if rows:
+        review_ws.append_rows(rows, value_input_option="RAW")
+        print(f"[DONE] recent_acptnos={len(recent_acptnos)} review_added={len(rows)}")
+    else:
+        print(f"[DONE] recent_acptnos={len(recent_acptnos)} review_added=0")
 
 
 if __name__ == "__main__":
