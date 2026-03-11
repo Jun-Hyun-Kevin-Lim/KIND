@@ -2325,6 +2325,143 @@ def _option_has_terminal(text: str, option_type: str) -> bool:
     return _option_text_has_any(normalize_text(text), _option_rule_pack(option_type)["terminal"])
 
 
+def _option_is_schedule_like(text: str) -> bool:
+    s = normalize_text(text)
+    if not s:
+        return False
+
+    n = _norm(s).lower()
+
+    strong_kws = [
+        "fromto",
+        "행사기간",
+        "청구기간",
+        "행사금액",
+        "행사가액",
+        "행사가격",
+        "상환율",
+        "차수",
+    ]
+    weak_kws = [
+        "from",
+        "to",
+        "1차",
+        "2차",
+        "3차",
+        "4차",
+        "5차",
+    ]
+
+    strong_hit = sum(1 for k in strong_kws if k in n)
+    weak_hit = sum(1 for k in weak_kws if k in s)
+
+    date_cnt = len(re.findall(r"\d{4}[-./년]\s*\d{1,2}[-./월]\s*\d{1,2}", s))
+    pct_cnt = len(re.findall(r"-?\d+(?:\.\d+)?\s*%", s))
+
+    if strong_hit >= 2:
+        return True
+    if strong_hit >= 1 and (date_cnt >= 2 or weak_hit >= 2):
+        return True
+    if date_cnt >= 3 and weak_hit >= 2:
+        return True
+    if "from" in n and "to" in n and date_cnt >= 2:
+        return True
+    if "차수" in n and (date_cnt >= 1 or pct_cnt >= 1):
+        return True
+
+    return False
+
+
+def _find_earliest_end(text: str, end_patterns: List[str], start_pos: int = 0) -> int:
+    end_positions = []
+    for pat in end_patterns:
+        m = re.search(pat, text[start_pos:], flags=re.I)
+        if m:
+            end_positions.append(start_pos + m.end())
+    return min(end_positions) if end_positions else -1
+
+
+def _find_earliest_boundary(text: str, boundary_patterns: List[str], start_pos: int = 0) -> int:
+    hit_positions = []
+    for pat in boundary_patterns:
+        m = re.search(pat, text[start_pos:], flags=re.I)
+        if m:
+            hit_positions.append(start_pos + m.start())
+    return min(hit_positions) if hit_positions else -1
+
+
+def _cleanup_option_result(text: str) -> str:
+    if not text:
+        return ""
+
+    text = normalize_text(text)
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = re.sub(r"\(주\d+\)", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(
+        r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    return text
+
+
+def _option_trim_to_body(text: str, option_type: str) -> str:
+    s = _cleanup_option_result(text)
+    if not s:
+        return ""
+
+    rules = _option_rule_pack(option_type)
+
+    best_anchor = None
+    for pat in rules["anchors"]:
+        m = re.search(pat, s, flags=re.I)
+        if m and (best_anchor is None or m.start() < best_anchor.start()):
+            best_anchor = m
+
+    if best_anchor:
+        s = s[best_anchor.start():]
+    else:
+        return ""
+
+    end_pos = _find_earliest_end(s, rules["terminal"], 0)
+    if end_pos != -1:
+        s = s[:end_pos]
+
+    extra_stops = rules["stop"] + [
+        r"\b\d+\.\s*기타\s*투자판단에\s*참고할\s*사항",
+        r"\b\d+\.\s*기타사항",
+        r"\b\d+\.\s*합병\s*관련\s*사항",
+        r"\b청약일\b",
+        r"\b납입일\b",
+        r"\b조달자금의\s*구체적\s*사용\s*목적\b",
+        r"\b사채\s*인수대금의\s*납입\b",
+        r"\bFROM\s+TO\b",
+        r"구분\s*매도청구권\s*행사기간",
+        r"구분\s*조기상환\s*청구기간",
+    ]
+
+    cut_positions = []
+    for pat in extra_stops:
+        m = re.search(pat, s[20:], flags=re.I)
+        if m:
+            cut_positions.append(20 + m.start())
+
+    if cut_positions:
+        s = s[:min(cut_positions)]
+
+    s = _cleanup_option_result(s)
+
+    if _option_is_schedule_like(s):
+        return ""
+
+    if len(s) < 20:
+        return ""
+
+    return s
+
+
 def _option_cell_units_from_tables(tables: List[pd.DataFrame]) -> List[Dict[str, Any]]:
     units = []
 
@@ -2378,10 +2515,6 @@ def _option_related_tables(tables: List[pd.DataFrame]) -> List[pd.DataFrame]:
 
 
 def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
-    """
-    옵션 관련 테이블만 대상으로,
-    셀 하나를 한 줄로 취급해서 corpus 생성.
-    """
     related = _option_related_tables(tables)
     units = _option_cell_units_from_tables(related)
     lines = [u["text"] for u in units if normalize_text(u["text"])]
@@ -2393,9 +2526,6 @@ def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
     return corpus.strip()
 
 
-# [옵션 대섹션만 자르기]
-# - 9-1. 옵션에 관한 사항 우선
-# - 9-1이 요약만 있고 실제 본문이 22/23/24. 기타 투자판단에 참고할 사항에 있는 경우까지 포함
 def _slice_block_from_heading(
     corpus: str,
     heading_patterns: List[str],
@@ -2480,50 +2610,10 @@ def _slice_option_major_section(corpus: str) -> str:
     return "\n".join(dedup).strip()
 
 
-def _find_earliest_end(text: str, end_patterns: List[str], start_pos: int = 0) -> int:
-    end_positions = []
-    for pat in end_patterns:
-        m = re.search(pat, text[start_pos:], flags=re.I)
-        if m:
-            end_positions.append(start_pos + m.end())
-    return min(end_positions) if end_positions else -1
-
-
-def _find_earliest_boundary(text: str, boundary_patterns: List[str], start_pos: int = 0) -> int:
-    hit_positions = []
-    for pat in boundary_patterns:
-        m = re.search(pat, text[start_pos:], flags=re.I)
-        if m:
-            hit_positions.append(start_pos + m.start())
-    return min(hit_positions) if hit_positions else -1
-
-
-def _cleanup_option_result(text: str) -> str:
-    if not text:
-        return ""
-
-    text = normalize_text(text)
-    text = re.sub(r"\s*\|\s*", " ", text)
-    text = re.sub(r"\(주\d+\)", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(
-        r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?",
-        "",
-        text,
-        flags=re.I,
-    ).strip()
-    return text
-
-
 def extract_option_from_parallel_columns(
     tables: List[pd.DataFrame],
     option_type: str,
 ) -> str:
-    """
-    병렬 2열형:
-    Put / Call 헤더가 같은 row의 서로 다른 column에 있는 경우,
-    해당 column 아래만 따라 내려간다.
-    """
     rules = _option_rule_pack(option_type)
     related = _option_related_tables(tables)
     candidates = []
@@ -2555,10 +2645,8 @@ def extract_option_from_parallel_columns(
 
             if option_type == "put":
                 target_col = put_cols[0]
-                opposite_cols = call_cols
             else:
                 target_col = call_cols[0]
-                opposite_cols = put_cols
 
             lines = []
             saw_anchor = False
@@ -2567,18 +2655,7 @@ def extract_option_from_parallel_columns(
                 target_txt = normalize_text(arr[rr][target_col]) if target_col < C else ""
                 row_join = _option_row_join(arr[rr].tolist())
 
-                opposite_row_text = " ".join(
-                    [
-                        normalize_text(arr[rr][oc])
-                        for oc in opposite_cols
-                        if oc < C and normalize_text(arr[rr][oc])
-                    ]
-                ).strip()
-
                 if rr > r:
-                    if opposite_row_text and _option_text_has_any(opposite_row_text, rules["stop"]):
-                        pass
-
                     if target_txt and _option_text_has_any(target_txt, rules["stop"]):
                         break
 
@@ -2601,10 +2678,8 @@ def extract_option_from_parallel_columns(
                 if _option_text_has_any(target_txt, rules["terminal"]):
                     break
 
-            candidate = _cleanup_option_result(" ".join(lines))
+            candidate = _option_trim_to_body(" ".join(lines), option_type)
             if not candidate:
-                continue
-            if _option_is_heading_only(candidate, option_type):
                 continue
             candidates.append(candidate)
 
@@ -2619,10 +2694,6 @@ def extract_option_value_by_same_column(
     tables: List[pd.DataFrame],
     option_type: str,
 ) -> str:
-    """
-    기존 함수명 유지.
-    실제로는 병렬 2열형 전용 extractor를 호출.
-    """
     return extract_option_from_parallel_columns(tables, option_type)
 
 
@@ -2631,11 +2702,6 @@ def extract_option_from_label_value_rows(
     corr_after: Dict[str, str],
     option_type: str,
 ) -> str:
-    """
-    라벨-값형:
-    '조기상환청구권(Put Option)에 관한 사항 | 본문'
-    '매도청구권(Call Option)에 관한 사항 | 본문'
-    """
     rules = _option_rule_pack(option_type)
     candidates = []
 
@@ -2645,8 +2711,8 @@ def extract_option_from_label_value_rows(
             v_txt = normalize_text(v)
 
             if _option_text_has_any(k_txt, rules["header_strong"] + rules["header_weak"]):
-                cand = _cleanup_option_result(v_txt)
-                if cand and not _option_is_heading_only(cand, option_type):
+                cand = _option_trim_to_body(v_txt, option_type)
+                if cand:
                     candidates.append(cand)
 
     related = _option_related_tables(tables)
@@ -2681,10 +2747,8 @@ def extract_option_from_label_value_rows(
                     if down_right:
                         right_vals.append(" ".join(down_right))
 
-                candidate = _cleanup_option_result(" ".join(right_vals))
+                candidate = _option_trim_to_body(" ".join(right_vals), option_type)
                 if not candidate:
-                    continue
-                if _option_is_heading_only(candidate, option_type):
                     continue
                 candidates.append(candidate)
 
@@ -2699,10 +2763,6 @@ def extract_option_from_single_text_rows(
     tables: List[pd.DataFrame],
     option_type: str,
 ) -> str:
-    """
-    단일 text 세로형:
-    제목행 -> 본문행 -> 종료행 순서로 내려가는 구조 처리.
-    """
     rules = _option_rule_pack(option_type)
     related = _option_related_tables(tables)
     candidates = []
@@ -2728,7 +2788,6 @@ def extract_option_from_single_text_rows(
                 _option_rule_pack("call")["header_strong"] + _option_rule_pack("call")["header_weak"],
             )
 
-            # 같은 row에 Put/Call 둘 다 있으면 병렬형으로 간주하고 여기서는 스킵
             if has_put and has_call:
                 continue
 
@@ -2764,10 +2823,8 @@ def extract_option_from_single_text_rows(
                 if _option_text_has_any(curr_join, rules["terminal"]):
                     break
 
-            candidate = _cleanup_option_result(" ".join(block_lines))
+            candidate = _option_trim_to_body(" ".join(block_lines), option_type)
             if not candidate:
-                continue
-            if _option_is_heading_only(candidate, option_type):
                 continue
             candidates.append(candidate)
 
@@ -2968,10 +3025,8 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
                     else:
                         end_pos = min(len(tail), 1800)
 
-                candidate = tail[:end_pos].strip()
-                candidate = _cleanup_option_result(candidate)
-
-                if len(candidate) < 40:
+                candidate = _option_trim_to_body(tail[:end_pos].strip(), option_key)
+                if not candidate or len(candidate) < 20:
                     continue
 
                 cand_norm = _norm(candidate)
@@ -3064,9 +3119,8 @@ def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: 
         if s_idx > 20 and s_idx < cut_idx:
             cut_idx = s_idx
 
-    result = _cleanup_option_result(result[:cut_idx])
-
-    if _option_is_heading_only(result, option_type):
+    result = _option_trim_to_body(result[:cut_idx], option_type)
+    if not result:
         return ""
 
     return result[:500] + ("..." if len(result) > 500 else "")
@@ -3203,10 +3257,9 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
         else:
             end_pos = stop_hit[0]
 
-    result = sub[:end_pos].strip()
-    result = _cleanup_option_result(result)
+    result = _option_trim_to_body(sub[:end_pos].strip(), option_type)
 
-    if len(result) < 10 or _option_is_heading_only(result, option_type):
+    if not result:
         return ""
 
     return result
@@ -3222,34 +3275,42 @@ def _score_option_text(text: str, option_type: str) -> int:
     score = min(len(s), 800)
 
     if _option_text_has_any(s, rules["anchors"]):
-        score += 300
+        score += 350
+    else:
+        score -= 500
+
     if _option_text_has_any(s, rules["terminal"]):
-        score += 120
+        score += 150
+
     if _option_text_has_any(s, rules["header_strong"]):
-        score += 80
+        score += 60
+
     if _option_text_has_any(s, rules["noise"]):
         score -= 350
 
     if _option_is_heading_only(s, option_type):
-        score -= 700
+        score -= 900
+
+    if _option_is_schedule_like(s):
+        score -= 1200
 
     if option_type == "put":
         if "putoption" in n or "풋옵션" in n:
             score += 120
         if "조기상환청구권" in n or "사채권자" in n or "조기상환" in n:
-            score += 80
+            score += 100
         if ("calloption" in n or "콜옵션" in n) and not ("putoption" in n or "풋옵션" in n):
-            score -= 600
+            score -= 700
     else:
         if "calloption" in n or "콜옵션" in n:
             score += 120
         if "매도청구권" in n or "발행회사" in n or "지정하는자" in n:
-            score += 80
+            score += 100
         if ("putoption" in n or "풋옵션" in n) and not ("calloption" in n or "콜옵션" in n):
-            score -= 600
+            score -= 700
 
     if len(s) < 20:
-        score -= 200
+        score -= 250
 
     return score
 
@@ -3283,12 +3344,6 @@ def extract_option_value_primary(
     corr_after: Dict[str, str],
     option_type: str,
 ) -> str:
-    """
-    1차 추출은 이제 구조 기반으로 바꿈.
-    - 병렬 2열형
-    - 라벨-값형
-    - 단일 text 세로형
-    """
     parallel_val = extract_option_from_parallel_columns(dfs, option_type)
     label_val = extract_option_from_label_value_rows(dfs, corr_after, option_type)
     single_text_val = extract_option_from_single_text_rows(dfs, option_type)
@@ -3299,6 +3354,32 @@ def extract_option_value_primary(
         label_val,
         single_text_val,
     )
+
+
+def debug_option_candidates(acpt_no: str, tables: List[pd.DataFrame], corr_after: Dict[str, str]):
+    print(f"\n[DEBUG_OPTION] acpt_no={acpt_no}")
+
+    put_candidates = {
+        "primary": extract_option_value_primary(tables, corr_after, "put"),
+        "same_column": extract_option_value_by_same_column(tables, "put"),
+        "section": extract_option_section_from_tables(tables, "put"),
+        "anchor_range": extract_option_block_by_anchor_range(tables, "put"),
+        "details": extract_option_details_from_tables(tables, "put"),
+    }
+
+    call_candidates = {
+        "primary": extract_option_value_primary(tables, corr_after, "call"),
+        "same_column": extract_option_value_by_same_column(tables, "call"),
+        "section": extract_option_section_from_tables(tables, "call"),
+        "anchor_range": extract_option_block_by_anchor_range(tables, "call"),
+        "details": extract_option_details_from_tables(tables, "call"),
+    }
+
+    for k, v in put_candidates.items():
+        print(f"[PUT][{k}] {v[:500] if v else ''}")
+
+    for k, v in call_candidates.items():
+        print(f"[CALL][{k}] {v[:500] if v else ''}")
 
 
 # [기간형 날짜 2개 추출]
@@ -3767,14 +3848,26 @@ def parse_bond_record(rec: Dict[str, Any]):
             continue
         if not normalize_text(row[h]):
             missing.append(h)
-
+    
     if not row["구분"]:
         suspicious.append("구분")
     if row["회사명"] in ["유", "코", "넥"]:
         suspicious.append("회사명")
     if row["보고서명"] and len(row["보고서명"]) < 5:
         suspicious.append("보고서명")
-
+    
+    if row["Put Option"] and _option_is_schedule_like(row["Put Option"]):
+        suspicious.append("Put Option")
+    
+    if row["Call Option"] and _option_is_schedule_like(row["Call Option"]):
+        suspicious.append("Call Option")
+    
+    if row["Put Option"] and not _option_has_anchor(row["Put Option"], "put"):
+        suspicious.append("Put Option")
+    
+    if row["Call Option"] and not _option_has_anchor(row["Call Option"], "call"):
+        suspicious.append("Call Option")
+    
     return row, missing, suspicious
 
 
