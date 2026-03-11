@@ -21,8 +21,8 @@ GOOGLE_CREDENTIALS_JSON = (
 )
 
 RAW_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_dump")
-RIGHTS_SHEET_NAME = os.getenv("RIGHTS_SHEET_NAME", "유상증자")
-BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "주식연계채권")
+RIGHTS_SHEET_NAME = os.getenv("RIGHTS_SHEET_NAME", "K_유상증자")
+BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "K_주식연계채권")
 
 RUN_ONLY_ACPTNO = os.getenv("RUN_ONLY_ACPTNO", "").strip()
 
