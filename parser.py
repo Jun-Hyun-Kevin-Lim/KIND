@@ -2885,6 +2885,28 @@ def upsert_structured_row(
     end_col = gspread.utils.rowcol_to_a1(1, len(headers)).rstrip("1")
 
     if target_row:
+        # --------------------------------------------------
+        # bond 시트는 옵션 전용 컬럼 기존값 보존
+        # main_parse.py가 먼저 돌고
+        # main_option.py가 나중에 옵션 4개 컬럼만 갱신하는 구조이므로
+        # parser 단계에서 빈값으로 덮어쓰지 않도록 보호
+        # --------------------------------------------------
+        if sheet_type == "bond":
+            existing_row = ws.row_values(target_row)
+            preserve_cols = ["Put Option", "Call Option", "Call 비율", "YTC"]
+
+            for col in preserve_cols:
+                if col not in headers:
+                    continue
+
+                idx = headers.index(col)
+                new_val = row_dict.get(col, "")
+                old_val = safe_cell(existing_row, idx)
+
+                # 새 값이 비어 있으면 기존 값 유지
+                if not normalize_text(new_val):
+                    row_values[idx] = old_val
+
         ws.update(f"A{target_row}:{end_col}{target_row}", [row_values])
         return "UPDATE", target_row
 
