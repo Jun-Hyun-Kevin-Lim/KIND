@@ -259,12 +259,18 @@ def _norm_date(s: Any) -> str:
 
 
 # [날짜 포맷 통일]
-# - 다양한 날짜 표현을 "YYYY년 MM월 DD일" 형식으로 정리
+# - 다양한 날짜 표현을 "YYYY-MM-DD" 형식으로 정리
 def _format_date(s: Any) -> str:
     txt = _single_line(s)
+
     m = re.search(r"(\d{4})[-년\./\s]+(\d{1,2})[-월\./\s]+(\d{1,2})", txt)
     if m:
-        return f"{m.group(1)}년 {int(m.group(2)):02d}월 {int(m.group(3)):02d}일"
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+    m2 = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", txt)
+    if m2:
+        return f"{m2.group(1)}-{m2.group(2)}-{m2.group(3)}"
+
     return txt
 
 
