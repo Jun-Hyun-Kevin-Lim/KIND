@@ -2719,6 +2719,111 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
     return ratio, ytc
 
+def _extract_dates_from_text(text: str) -> List[str]:
+    if not text:
+        return []
+
+    found = []
+
+    # 2026년 03월 10일 / 2026-03-10 / 2026.03.10
+    for m in re.finditer(r"(\d{4})[-년\./\s]+(\d{1,2})[-월\./\s]+(\d{1,2})", str(text)):
+        d = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        found.append(d)
+
+    # 20260310
+    for m in re.finditer(r"\b(\d{4})(\d{2})(\d{2})\b", str(text)):
+        d = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        found.append(d)
+
+    uniq = []
+    for d in found:
+        if d not in uniq:
+            uniq.append(d)
+    return uniq
+
+
+def extract_period_dates_from_tables(
+    dfs: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+    period_keywords: List[str],
+) -> Tuple[str, str]:
+    """
+    전환청구기간 / 교환청구기간 / 권리행사기간에서 시작일, 종료일 추출
+    """
+
+    keys = [_norm(x) for x in period_keywords if x]
+
+    def _match_period_label(text: str) -> bool:
+        t = _norm(text)
+        return any(k in t for k in keys)
+
+    # 1순위: 정정공시 정정후 값
+    if corr_after:
+        for k, v in corr_after.items():
+            if _match_period_label(k):
+                dates = _extract_dates_from_text(f"{k} {v}")
+                if len(dates) >= 2:
+                    return dates[0], dates[1]
+                if len(dates) == 1:
+                    return dates[0], ""
+
+    # 2순위: 실제 표 행 스캔
+    for df in dfs:
+        try:
+            arr = df.fillna("").astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
+        for r in range(R):
+            row_text = " ".join([normalize_text(x) for x in arr[r].tolist() if normalize_text(x)])
+            if not row_text:
+                continue
+
+            if _match_period_label(row_text):
+                block = [row_text]
+
+                for rr in range(r + 1, min(r + 3, R)):
+                    next_row = " ".join([normalize_text(x) for x in arr[rr].tolist() if normalize_text(x)])
+                    if next_row:
+                        block.append(next_row)
+
+                dates = _extract_dates_from_text(" ".join(block))
+                if len(dates) >= 2:
+                    return dates[0], dates[1]
+                if len(dates) == 1:
+                    return dates[0], ""
+
+    # 3순위: 라벨 기반 fallback
+    val = scan_label_value_preferring_correction(
+        dfs,
+        period_keywords,
+        corr_after,
+    )
+    dates = _extract_dates_from_text(val)
+    if len(dates) >= 2:
+        return dates[0], dates[1]
+    if len(dates) == 1:
+        return dates[0], ""
+
+    # 4순위: 전체 라인 fallback
+    lines = all_text_lines(dfs)
+    for i, line in enumerate(lines):
+        if _match_period_label(line):
+            merged = line
+            if i + 1 < len(lines):
+                merged += " " + lines[i + 1]
+            if i + 2 < len(lines):
+                merged += " " + lines[i + 2]
+
+            dates = _extract_dates_from_text(merged)
+            if len(dates) >= 2:
+                return dates[0], dates[1]
+            if len(dates) == 1:
+                return dates[0], ""
+
+    return "", ""
+
 # ==========================================================
 # Parsers
 # ==========================================================
