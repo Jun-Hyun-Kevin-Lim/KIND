@@ -59,6 +59,27 @@ def _find_earliest_start(text: str, patterns: List[str], flags=re.I | re.M) -> i
 
 
 # ==========================================================
+# [퍼센트 안전 정리]
+# - 숫자/퍼센트가 아니면 빈값 반환
+# - "구분" 같은 오염값 방지
+# ==========================================================
+def _safe_percent(value: str) -> str:
+    s = normalize_text(value)
+    if not s:
+        return ""
+
+    m = re.search(r"-?\d+(?:\.\d+)?\s*%", s)
+    if m:
+        return m.group(0).replace(" ", "")
+
+    s2 = s.replace(",", "")
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", s2):
+        return f"{s2}%"
+
+    return ""
+
+
+# ==========================================================
 # [9-1 옵션 대섹션 자르기]
 # - 있으면 9-1 옵션 파트만 남기고
 # - 없으면 전체 corpus 그대로 사용
@@ -69,7 +90,6 @@ def _slice_option_major_section(corpus: str) -> str:
 
     start_patterns = [
         r"\n?\s*9\s*[-\.]?\s*1\s*[\.\)]?\s*옵션에\s*관한\s*사항",
-        r"\n?\s*9\s*[-\.]?\s*1\s*[\.\)]?\s*기타\s*투자판단에\s*참고할\s*사항",
         r"\n?\s*옵션에\s*관한\s*사항",
     ]
 
@@ -78,6 +98,7 @@ def _slice_option_major_section(corpus: str) -> str:
         r"\n\s*10\s*[\.\)]\s*[가-힣A-Za-z]",
         r"\n\s*11\s*[\.\)]\s*[가-힣A-Za-z]",
         r"\n\s*12\s*[\.\)]\s*[가-힣A-Za-z]",
+        r"\n\s*23\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
         r"\n\s*【",
         r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
     ]
@@ -98,7 +119,7 @@ def _slice_option_major_section(corpus: str) -> str:
 # [옵션 결과 텍스트 정리]
 # - 표 헤더/잡행 제거
 # - 파이프 제거
-# - 공백 정리
+# - 남아 있는 헤더/참고문구 제거
 # ==========================================================
 def _cleanup_option_result(text: str) -> str:
     if not text:
@@ -127,6 +148,35 @@ def _cleanup_option_result(text: str) -> str:
         cleaned_lines.append(s)
 
     out = " ".join(cleaned_lines)
+
+    # 남아 있는 옵션 헤더 제거
+    out = re.sub(
+        r"\[\s*(?:조기상환청구권|매도청구권|중도상환청구권)\s*\(\s*(?:Put|Call)\s*Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
+        "",
+        out,
+        flags=re.I,
+    )
+    out = re.sub(
+        r"^(?:조기상환청구권|매도청구권|중도상환청구권)\s*\(\s*(?:Put|Call)\s*Option\s*\)\s*에\s*관한\s*사항\s*",
+        "",
+        out,
+        flags=re.I,
+    )
+
+    # 뒤에 붙는 참고문구 제거
+    out = re.sub(
+        r"(?:이\s*외\s*)?조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*및\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*세부내용은.*$",
+        "",
+        out,
+        flags=re.I,
+    )
+    out = re.sub(
+        r"23\.\s*기타\s*투자판단에\s*참고할\s*사항.*$",
+        "",
+        out,
+        flags=re.I,
+    )
+
     out = re.sub(r"\(주\d+\)", " ", out)
     out = re.sub(r"\s+", " ", out).strip()
     out = re.sub(r"^[\s:：\-–]+", "", out).strip()
@@ -160,6 +210,9 @@ NEXT_SECTION_PATTERNS = [
     r"\n\s*10\s*[\.\)]\s*[가-힣A-Za-z]",
     r"\n\s*11\s*[\.\)]\s*[가-힣A-Za-z]",
     r"\n\s*12\s*[\.\)]\s*[가-힣A-Za-z]",
+    r"\n\s*23\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
+    r"\n\s*기타\s*투자판단에\s*참고할\s*사항",
+    r"\n\s*이\s*외\s*조기상환청구권.*?참고하시기\s*바랍니다\.?",
     r"\n\s*【",
 ]
 
@@ -312,8 +365,7 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     row["Put Option"] = put_text
     row["Call Option"] = call_text
 
-    # 1순위: 라벨 기반
-    row["Call 비율"] = clean_percent(
+    row["Call 비율"] = _safe_percent(
         scan_label_value_preferring_correction(
             tables,
             [
@@ -329,7 +381,7 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
         )
     )
 
-    row["YTC"] = clean_percent(
+    row["YTC"] = _safe_percent(
         scan_label_value_preferring_correction(
             tables,
             [
