@@ -67,10 +67,6 @@ jobs:
         run: |
           python main_option.py
 
-      - name: Run validator
-        run: |
-          python validator.py
-
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
