@@ -86,21 +86,20 @@ def _find_first_match(text: str, patterns: List[str]):
 def _find_next_heading_start(text: str, start_pos: int) -> int:
     """
     다음 큰 섹션 시작점을 찾는다.
-    - 9-2 / 9.2 / 10. / 11. / 22. / 23. / 24. 등
     """
     heading_patterns = [
-        r"(?:^|\n)\s*9[\-\.\s]*2[\)\.]?\s+",
-        r"(?:^|\n)\s*9[\-\.\s]*3[\)\.]?\s+",
-        r"(?:^|\n)\s*10[\)\.]?\s+",
-        r"(?:^|\n)\s*11[\)\.]?\s+",
-        r"(?:^|\n)\s*12[\)\.]?\s+",
-        r"(?:^|\n)\s*13[\)\.]?\s+",
-        r"(?:^|\n)\s*20[\)\.]?\s+",
-        r"(?:^|\n)\s*21[\)\.]?\s+",
-        r"(?:^|\n)\s*22[\)\.]?\s+",
-        r"(?:^|\n)\s*23[\)\.]?\s+",
-        r"(?:^|\n)\s*24[\)\.]?\s+",
-        r"(?:^|\n)\s*25[\)\.]?\s+",
+        r"(?:^|\n)\s*9\s*[-\.]?\s*2\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*9\s*[-\.]?\s*3\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*10\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*11\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*12\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*13\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*20\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*21\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*22\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*23\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*24\s*[\)\.]?\s+",
+        r"(?:^|\n)\s*25\s*[\)\.]?\s+",
     ]
 
     cut = len(text)
@@ -120,8 +119,8 @@ def _extract_91_option_section(corpus: str) -> str:
         return ""
 
     start_patterns = [
-        r"(?:^|\n)\s*9[\-\.\s]*1[\)\.]?\s*옵션에\s*관한\s*사항",
-        r"(?:^|\n)\s*9[\-\.\s]*1[\)\.]?\s*옵션사항",
+        r"(?:^|\n)\s*9\s*[-\.]?\s*1\s*[\)\.]?\s*옵션에\s*관한\s*사항",
+        r"(?:^|\n)\s*9\s*[-\.]?\s*1\s*[\)\.]?\s*옵션사항",
     ]
 
     m = _find_first_match(corpus, start_patterns)
@@ -141,12 +140,12 @@ def _extract_22_23_reference_sections(corpus: str) -> List[str]:
 
     start_patterns_map = {
         "22": [
-            r"(?:^|\n)\s*22[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
-            r"(?:^|\n)\s*22[\)\.]?\s*기타\s*투자판단에\s*관한\s*사항",
+            r"(?:^|\n)\s*22\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
+            r"(?:^|\n)\s*22\s*[\)\.]?\s*기타\s*투자판단에\s*관한\s*사항",
         ],
         "23": [
-            r"(?:^|\n)\s*23[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
-            r"(?:^|\n)\s*23[\)\.]?\s*기타\s*투자판단에\s*관한\s*사항",
+            r"(?:^|\n)\s*23\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
+            r"(?:^|\n)\s*23\s*[\)\.]?\s*기타\s*투자판단에\s*관한\s*사항",
         ],
     }
 
@@ -172,10 +171,12 @@ def _has_reference_to_22_23(text: str) -> bool:
         return False
 
     ref_patterns = [
-        r"22[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항\s*참조",
-        r"23[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항\s*참조",
-        r"22[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항(?:을)?\s*참고",
-        r"23[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항(?:을)?\s*참고",
+        r"22\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항\s*참조",
+        r"23\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항\s*참조",
+        r"22\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항(?:을)?\s*참고",
+        r"23\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항(?:을)?\s*참고",
+        r"22\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항을\s*참조",
+        r"23\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항을\s*참조",
     ]
     return any(re.search(pat, text, flags=re.IGNORECASE) for pat in ref_patterns)
 
@@ -185,23 +186,23 @@ def _has_reference_to_22_23(text: str) -> bool:
 # ==========================================================
 def _put_heading_patterns() -> List[str]:
     return [
-        r"(?:^|\n)\s*[\[【(]?\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*조기상환청구권\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*Put\s*Option\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*PUT\s*OPTION\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*풋옵션\s*에\s*관한\s*사항\s*[\]】)]?",
+        r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"조기상환청구권\s*에\s*관한\s*사항",
+        r"Put\s*Option\s*에\s*관한\s*사항",
+        r"\[\s*PUT\s*OPTION\s*\]",
+        r"풋옵션\s*에\s*관한\s*사항",
     ]
 
 
 def _call_heading_patterns() -> List[str]:
     return [
-        r"(?:^|\n)\s*[\[【(]?\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*매도청구권\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*중도상환청구권\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*Call\s*Option\s*에\s*관한\s*사항\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*CALL\s*OPTION\s*[\]】)]?",
-        r"(?:^|\n)\s*[\[【(]?\s*콜옵션\s*에\s*관한\s*사항\s*[\]】)]?",
+        r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"매도청구권\s*에\s*관한\s*사항",
+        r"중도상환청구권\s*에\s*관한\s*사항",
+        r"Call\s*Option\s*에\s*관한\s*사항",
+        r"\[\s*CALL\s*OPTION\s*\]",
+        r"콜옵션\s*에\s*관한\s*사항",
     ]
 
 
@@ -254,13 +255,13 @@ def _cut_option_noise(text: str, option_type: str) -> str:
         *[re.escape(x) for x in opp_kws],
         r"\n\s*Call\s*Option\s*행사",
         r"\n\s*Put\s*Option\s*행사",
-        r"(?:^|\n)\s*9[\-\.\s]*2[\)\.]?",
-        r"(?:^|\n)\s*10[\)\.]?",
-        r"(?:^|\n)\s*11[\)\.]?",
-        r"(?:^|\n)\s*12[\)\.]?",
-        r"(?:^|\n)\s*22[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
-        r"(?:^|\n)\s*23[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
-        r"(?:^|\n)\s*24[\)\.]?",
+        r"(?:^|\n)\s*9\s*[-\.]?\s*2\s*[\)\.]?",
+        r"(?:^|\n)\s*10\s*[\)\.]?",
+        r"(?:^|\n)\s*11\s*[\)\.]?",
+        r"(?:^|\n)\s*12\s*[\)\.]?",
+        r"(?:^|\n)\s*22\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
+        r"(?:^|\n)\s*23\s*[\)\.]?\s*기타\s*투자판단에\s*참고(?:할)?\s*사항",
+        r"(?:^|\n)\s*24\s*[\)\.]?",
         r"【\s*특정인",
         r"\[\s*특정인",
         r"사채권자의\s*본\s*사채\s*의무보유",
@@ -312,7 +313,7 @@ def _extract_put_call_from_block(block: str) -> Tuple[str, str]:
 # [옵션 본문 추출 메인]
 # - 1순위: 9-1
 # - 2순위: 9-1 안에 22/23 참조가 있으면 해당 섹션
-# - 3순위: 전체 corpus fallback
+# - 3순위: 더 이상 fallback 없음
 # ==========================================================
 def extract_put_call_texts(corpus: str) -> Tuple[str, str]:
     if not corpus:
@@ -357,14 +358,6 @@ def extract_put_call_texts(corpus: str) -> Tuple[str, str]:
 
             if put_text and call_text:
                 break
-
-    # 4) 마지막 fallback: 전체 corpus에서 직접 탐색
-    if not put_text or not call_text:
-        p_all, c_all = _extract_put_call_from_block(corpus)
-        if not put_text and p_all:
-            put_text = p_all
-        if not call_text and c_all:
-            call_text = c_all
 
     return _cleanup_option_result(put_text), _cleanup_option_result(call_text)
 
@@ -419,6 +412,7 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
 # ==========================================================
 # [옵션 전용 레코드 파서]
+# - Put / Call 못 찾으면 "공시 확인 바람"
 # ==========================================================
 def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     title = clean_title(rec.get("title", "") or "")
@@ -436,8 +430,9 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
 
     # 1. Put / Call 본문 추출
     put_text, call_text = extract_put_call_texts(corpus)
-    row["Put Option"] = put_text
-    row["Call Option"] = call_text
+
+    row["Put Option"] = put_text if put_text else "공시 확인 바람"
+    row["Call Option"] = call_text if call_text else "공시 확인 바람"
 
     # 2. 표(Key-Value) 우선 추출
     row["Call 비율"] = _safe_percent(
@@ -468,6 +463,7 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     )
 
     # 3. 표에서 못 찾았으면 Call 본문에서 fallback
+    #    단, "공시 확인 바람"으로 바뀌기 전의 raw call_text 기준으로 본다.
     if not row["Call 비율"] or not row["YTC"]:
         extracted_ratio, extracted_ytc = extract_call_ratio_and_ytc_from_text(call_text)
 
