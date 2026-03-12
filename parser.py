@@ -2145,7 +2145,12 @@ def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) 
 
 # ==========================================================
 # [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
-# - 구조 우선순위:
+# - 신규 우선순위:
+#   0) "9-1. 옵션에 관한 사항" 섹션을 먼저 찾고
+#      그 안에서
+#      - Put  : [조기상환청구권(Put Option)에 관한 사항]
+#      - Call : [매도청구권(Call Option)에 관한 사항]
+#      를 먼저 추출
 #   1) 병렬 2열형 (Put / Call 좌우 분리)
 #   2) 라벨-값형
 #   3) 단일 text 세로형
@@ -2399,7 +2404,7 @@ def _cleanup_option_result(text: str) -> str:
     text = re.sub(r"\(주\d+\)", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(
-        r"^(?:9\s*-\s*1\.\s*옵션에\s*관한\s*사항\s*)?",
+        r"^(?:9\s*-\s*1[\.\)]\s*옵션에\s*관한\s*사항\s*)?",
         "",
         text,
         flags=re.I,
@@ -2560,7 +2565,9 @@ def _slice_option_major_section(corpus: str) -> str:
 
     common_end_patterns = [
         r"\n\s*9\s*-\s*2\s*\.",
+        r"\n\s*9\s*-\s*2\s*[\.\)]",
         r"\n\s*10\s*\.",
+        r"\n\s*10\s*[\.\)]",
         r"\n\s*24\s*[\.\)]\s*정관에\s*정한\s*신주인수권의\s*내용",
         r"\n\s*25\s*[\.\)]",
         r"\n\s*【",
@@ -2608,6 +2615,124 @@ def _slice_option_major_section(corpus: str) -> str:
         dedup.append(sec)
 
     return "\n".join(dedup).strip()
+
+
+# ==========================================================
+# [신규] 9-1. 옵션에 관한 사항 섹션 우선 추출
+# ==========================================================
+def _slice_exact_9_1_option_section(corpus: str) -> str:
+    if not corpus:
+        return ""
+
+    end_patterns = [
+        r"\n\s*9\s*-\s*2\s*[\.\)]",
+        r"\n\s*10\s*[\.\)]",
+        r"\n\s*24\s*[\.\)]\s*정관에\s*정한\s*신주인수권의\s*내용",
+        r"\n\s*25\s*[\.\)]",
+        r"\n\s*【",
+        r"\n\s*\[",
+        r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
+    ]
+
+    return _slice_block_from_heading(
+        corpus,
+        [
+            r"9\s*-\s*1\s*[\.\)]\s*옵션에\s*관한\s*사항",
+        ],
+        end_patterns,
+    )
+
+
+def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
+    best = None
+    for pat in patterns:
+        m = re.search(pat, text[start_pos:], flags=re.I)
+        if not m:
+            continue
+
+        abs_start = start_pos + m.start()
+        abs_end = start_pos + m.end()
+
+        if best is None or abs_start < best[0]:
+            best = (abs_start, abs_end, pat)
+
+    return best
+
+
+def extract_option_from_9_1_section_first(
+    tables: List[pd.DataFrame],
+    option_type: str,
+) -> str:
+    """
+    우선순위:
+    1) 먼저 '9-1. 옵션에 관한 사항' 섹션을 찾는다.
+    2) 그 안에서
+       - put  : [조기상환청구권(Put Option)에 관한 사항]
+       - call : [매도청구권(Call Option)에 관한 사항]
+       를 찾는다.
+    3) 본문은 anchor ~ terminal 기준으로 자르고,
+       terminal이 없으면 다음 소제목/대제목 직전에서 끊는다.
+    4) 못 찾으면 "" 반환 -> 기존 로직 fallback
+    """
+    corpus = _option_corpus_from_tables(tables)
+    if not corpus:
+        return ""
+
+    section_91 = _slice_exact_9_1_option_section(corpus)
+    if not section_91:
+        return ""
+
+    option_key = (option_type or "").strip().lower()
+    if option_key == "put":
+        start_patterns = [
+            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항",
+        ]
+        stop_patterns = [
+            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항",
+            r"\n\s*9\s*-\s*2\s*[\.\)]",
+            r"\n\s*10\s*[\.\)]",
+            r"\n\s*【",
+            r"\n\s*\[",
+        ]
+    else:
+        start_patterns = [
+            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+            r"매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항",
+        ]
+        stop_patterns = [
+            r"\n\s*9\s*-\s*2\s*[\.\)]",
+            r"\n\s*10\s*[\.\)]",
+            r"\n\s*【",
+            r"\n\s*\[",
+        ]
+
+    start_hit = _find_first_regex_match(section_91, start_patterns)
+    if not start_hit:
+        return ""
+
+    start_pos = section_91.rfind("\n", 0, start_hit[0]) + 1
+    sub = section_91[start_pos:]
+
+    stop_hit = _find_first_regex_match(sub, stop_patterns, start_pos=20)
+    end_pos = len(sub)
+
+    if stop_hit:
+        stop_line_start = sub.rfind("\n", 0, stop_hit[0])
+        end_pos = stop_line_start if stop_line_start > 0 else stop_hit[0]
+
+    candidate = _option_trim_to_body(sub[:end_pos].strip(), option_key)
+    if not candidate:
+        return ""
+
+    return candidate
 
 
 def extract_option_from_parallel_columns(
@@ -3126,74 +3251,6 @@ def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: 
     return result[:500] + ("..." if len(result) > 500 else "")
 
 
-def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
-    text = normalize_text(text)
-    if not text:
-        return "", ""
-
-    ratio = ""
-    ytc = ""
-
-    percent_matches = re.findall(r"-?\d+(?:\.\d+)?\s*%", text)
-    percent_vals = []
-    for p in percent_matches:
-        val = parse_float_like(p)
-        if val is not None:
-            percent_vals.append((clean_percent(p), val))
-
-    explicit_ratio_patterns = [
-        r"(?:콜옵션\s*행사비율|매도청구권\s*행사비율|Call\s*비율|콜옵션\s*비율|매도청구권\s*비율|권면총액\s*대비\s*비율|행사비율)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
-        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:에\s*해당하는)?\s*(?:콜옵션|매도청구권)",
-    ]
-    for pat in explicit_ratio_patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            ratio = f"{m.group(1)}%"
-            break
-
-    explicit_ytc_patterns = [
-        r"(?:YTC|Yield\s*To\s*Call|조기상환수익률|조기상환이율|연복리수익률)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
-        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:의\s*)?(?:조기상환수익률|연복리수익률|YTC)",
-    ]
-    for pat in explicit_ytc_patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            ytc = f"{m.group(1)}%"
-            break
-
-    if not ratio:
-        for raw, val in percent_vals:
-            if 0 < val <= 100:
-                ratio = raw
-                break
-
-    if not ytc:
-        for raw, val in percent_vals:
-            if raw == ratio:
-                continue
-            if -50 <= val <= 50:
-                ytc = raw
-                break
-
-    return ratio, ytc
-
-
-def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
-    best = None
-    for pat in patterns:
-        m = re.search(pat, text[start_pos:], flags=re.I)
-        if not m:
-            continue
-
-        abs_start = start_pos + m.start()
-        abs_end = start_pos + m.end()
-
-        if best is None or abs_start < best[0]:
-            best = (abs_start, abs_end, pat)
-
-    return best
-
-
 def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type: str) -> str:
     corpus = _option_corpus_from_tables(tables)
     if not corpus:
@@ -3354,6 +3411,59 @@ def extract_option_value_primary(
         label_val,
         single_text_val,
     )
+
+
+def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
+    text = normalize_text(text)
+    if not text:
+        return "", ""
+
+    ratio = ""
+    ytc = ""
+
+    percent_matches = re.findall(r"-?\d+(?:\.\d+)?\s*%", text)
+    percent_vals = []
+    for p in percent_matches:
+        val = parse_float_like(p)
+        if val is not None:
+            percent_vals.append((clean_percent(p), val))
+
+    explicit_ratio_patterns = [
+        r"(?:콜옵션\s*행사비율|매도청구권\s*행사비율|Call\s*비율|콜옵션\s*비율|매도청구권\s*비율|권면총액\s*대비\s*비율|행사비율)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
+        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:에\s*해당하는)?\s*(?:콜옵션|매도청구권)",
+    ]
+    for pat in explicit_ratio_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            ratio = f"{m.group(1)}%"
+            break
+
+    explicit_ytc_patterns = [
+        r"(?:YTC|Yield\s*To\s*Call|조기상환수익률|조기상환이율|연복리수익률)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
+        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:의\s*)?(?:조기상환수익률|연복리수익률|YTC)",
+    ]
+    for pat in explicit_ytc_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            ytc = f"{m.group(1)}%"
+            break
+
+    if not ratio:
+        for raw, val in percent_vals:
+            if 0 < val <= 100:
+                ratio = raw
+                break
+
+    if not ytc:
+        for raw, val in percent_vals:
+            if raw == ratio:
+                continue
+            if -50 <= val <= 50:
+                ytc = raw
+                break
+
+    return ratio, ytc
+
 
 # [기간형 날짜 2개 추출]
 # - 전환청구기간 / 교환청구기간 / 권리행사기간 블록에서 시작일/종료일 추출
