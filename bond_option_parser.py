@@ -1,6 +1,5 @@
 import re
 from typing import Dict, List, Tuple, Any
-
 import pandas as pd
 
 from parser import (
@@ -18,7 +17,6 @@ from parser import (
 
 # ==========================================================
 # [옵션 본문용 corpus 생성]
-# - RAW tables를 줄 단위 텍스트로 펴서 하나의 문자열로 만듦
 # ==========================================================
 def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
     lines = []
@@ -35,321 +33,126 @@ def _option_corpus_from_tables(tables: List[pd.DataFrame]) -> str:
 
 
 # ==========================================================
-# [정규식 매치 helper]
-# ==========================================================
-def _find_first_match(text: str, patterns: List[str], flags=re.I | re.M):
-    matches = []
-    for pat in patterns:
-        m = re.search(pat, text, flags=flags)
-        if m:
-            matches.append(m)
-    if not matches:
-        return None
-    matches.sort(key=lambda x: x.start())
-    return matches[0]
-
-
-def _find_earliest_start(text: str, patterns: List[str], flags=re.I | re.M) -> int:
-    starts = []
-    for pat in patterns:
-        m = re.search(pat, text, flags=flags)
-        if m:
-            starts.append(m.start())
-    return min(starts) if starts else -1
-
-
-# ==========================================================
-# [퍼센트 안전 정리]
-# - 숫자/퍼센트가 아니면 빈값 반환
-# - "구분" 같은 오염값 방지
-# ==========================================================
-def _safe_percent(value: str) -> str:
-    s = normalize_text(value)
-    if not s:
-        return ""
-
-    m = re.search(r"-?\d+(?:\.\d+)?\s*%", s)
-    if m:
-        return m.group(0).replace(" ", "")
-
-    s2 = s.replace(",", "")
-    if re.fullmatch(r"-?\d+(?:\.\d+)?", s2):
-        return f"{s2}%"
-
-    return ""
-
-
-# ==========================================================
-# [9-1 옵션 대섹션 자르기]
-# - 있으면 9-1 옵션 파트만 남기고
-# - 없으면 전체 corpus 그대로 사용
-# ==========================================================
-def _slice_option_major_section(corpus: str) -> str:
-    if not corpus:
-        return ""
-
-    start_patterns = [
-        r"\n?\s*9\s*[-\.]?\s*1\s*[\.\)]?\s*옵션에\s*관한\s*사항",
-        r"\n?\s*옵션에\s*관한\s*사항",
-    ]
-
-    end_patterns = [
-        r"\n\s*9\s*[-\.]?\s*2\s*[\.\)]\s*[가-힣A-Za-z]",
-        r"\n\s*10\s*[\.\)]\s*[가-힣A-Za-z]",
-        r"\n\s*11\s*[\.\)]\s*[가-힣A-Za-z]",
-        r"\n\s*12\s*[\.\)]\s*[가-힣A-Za-z]",
-        r"\n\s*23\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
-        r"\n\s*【",
-        r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
-    ]
-
-    m = _find_first_match(corpus, start_patterns)
-    if not m:
-        return corpus
-
-    sub = corpus[m.start():]
-    end_idx = _find_earliest_start(sub[1:], end_patterns)
-    if end_idx == -1:
-        return sub.strip()
-
-    return sub[: 1 + end_idx].strip()
-
-
-# ==========================================================
-# [옵션 결과 텍스트 정리]
-# - 표 헤더/잡행 제거
-# - 파이프 제거
-# - 남아 있는 헤더/참고문구 제거
+# [옵션 결과 텍스트 정리 (불필요한 공백 및 파이프 제거)]
 # ==========================================================
 def _cleanup_option_result(text: str) -> str:
     if not text:
         return ""
-
     text = text.replace("\xa0", " ")
     text = re.sub(r"\s*\|\s*", " ", text)
-
-    cleaned_lines = []
-    for raw in re.split(r"\n+", text):
-        s = normalize_text(raw)
-        if not s:
-            continue
-
-        s_norm = _norm(s)
-
-        if s in ["From", "To"]:
-            continue
-        if s_norm in ["from", "to", "구분", "비율"]:
-            continue
-        if "구분" in s and ("청구기간" in s or "행사기간" in s):
-            continue
-        if "From To" in s:
-            continue
-
-        cleaned_lines.append(s)
-
-    out = " ".join(cleaned_lines)
-
-    # 남아 있는 옵션 헤더 제거
-    out = re.sub(
-        r"\[\s*(?:조기상환청구권|매도청구권|중도상환청구권)\s*\(\s*(?:Put|Call)\s*Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
-        "",
-        out,
-        flags=re.I,
-    )
-    out = re.sub(
-        r"^(?:조기상환청구권|매도청구권|중도상환청구권)\s*\(\s*(?:Put|Call)\s*Option\s*\)\s*에\s*관한\s*사항\s*",
-        "",
-        out,
-        flags=re.I,
-    )
-
-    # 뒤에 붙는 참고문구 제거
-    out = re.sub(
-        r"(?:이\s*외\s*)?조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*및\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*세부내용은.*$",
-        "",
-        out,
-        flags=re.I,
-    )
-    out = re.sub(
-        r"23\.\s*기타\s*투자판단에\s*참고할\s*사항.*$",
-        "",
-        out,
-        flags=re.I,
-    )
-
-    out = re.sub(r"\(주\d+\)", " ", out)
-    out = re.sub(r"\s+", " ", out).strip()
-    out = re.sub(r"^[\s:：\-–]+", "", out).strip()
-
-    return out
+    text = re.sub(r"\n+", " ", text)  # 줄바꿈을 공백으로 펴기
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
 
 
 # ==========================================================
-# [Put / Call 헤더 패턴]
+# [Put / Call 텍스트 지능형 분리 추출]
+# - 하나의 코퍼스 내에서 Put과 Call의 위치를 찾아 영리하게 분리합니다.
 # ==========================================================
-PUT_HEADER_PATTERNS = [
-    r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-    r"사채권자의\s*조기상환청구권.*?에\s*관한\s*사항",
-]
-
-CALL_HEADER_PATTERNS = [
-    r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"\[\s*중도상환청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-    r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-    r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-    r"발행회사의\s*(?:매도청구권|중도상환청구권).*?에\s*관한\s*사항",
-]
-
-NEXT_SECTION_PATTERNS = [
-    r"\n\s*\[[^\n\]]{1,120}?에\s*관한\s*사항\s*\]",
-    r"\n\s*9\s*[-\.]?\s*2\s*[\.\)]\s*[가-힣A-Za-z]",
-    r"\n\s*10\s*[\.\)]\s*[가-힣A-Za-z]",
-    r"\n\s*11\s*[\.\)]\s*[가-힣A-Za-z]",
-    r"\n\s*12\s*[\.\)]\s*[가-힣A-Za-z]",
-    r"\n\s*23\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
-    r"\n\s*기타\s*투자판단에\s*참고할\s*사항",
-    r"\n\s*이\s*외\s*조기상환청구권.*?참고하시기\s*바랍니다\.?",
-    r"\n\s*【",
-]
-
-
-# ==========================================================
-# [섹션 자르기 공통]
-# - start 헤더 뒤부터 시작
-# - stop 패턴 나오기 직전까지 자름
-# ==========================================================
-def _extract_section_by_headers(
-    base_text: str,
-    start_patterns: List[str],
-    stop_patterns: List[str],
-) -> str:
-    if not base_text:
-        return ""
-
-    m = _find_first_match(base_text, start_patterns)
-    if not m:
-        return ""
-
-    sub = base_text[m.end():]
-    end_idx = _find_earliest_start(sub, stop_patterns)
-    if end_idx != -1:
-        sub = sub[:end_idx]
-
-    return _cleanup_option_result(sub)
-
-
-# ==========================================================
-# [Put 추출]
-# - Put 헤더 뒤 ~ Call 헤더 전
-# - 9-1 섹션에서 먼저 찾고, 없으면 전체 corpus에서 찾음
-# ==========================================================
-def extract_put_option_text(tables: List[pd.DataFrame]) -> str:
-    corpus = _option_corpus_from_tables(tables)
+def extract_put_call_texts(corpus: str) -> Tuple[str, str]:
     if not corpus:
-        return ""
+        return "", ""
 
-    option_area = _slice_option_major_section(corpus)
+    # DART 공시에서 자주 쓰이는 Put/Call 키워드
+    put_regex = re.compile(r"(?:조기상환청구권|Put\s*Option|풋옵션)", re.IGNORECASE)
+    call_regex = re.compile(r"(?:매도청구권|중도상환청구권|Call\s*Option|콜옵션)", re.IGNORECASE)
 
+    put_match = put_regex.search(corpus)
+    call_match = call_regex.search(corpus)
+
+    put_text = ""
+    call_text = ""
+
+    # 둘 다 있는 경우, 먼저 나온 것부터 다음 것이 나오기 전까지 자름
+    if put_match and call_match:
+        if put_match.start() < call_match.start():
+            put_text = corpus[put_match.start() : call_match.start()]
+            call_text = corpus[call_match.start() :]
+        else:
+            call_text = corpus[call_match.start() : put_match.start()]
+            put_text = corpus[put_match.start() :]
+    elif put_match:
+        put_text = corpus[put_match.start() :]
+    elif call_match:
+        call_text = corpus[call_match.start() :]
+
+    # 뒷부분에 엉뚱한 다음 목차가 딸려오는 것 방지 (예: 10. 합병 관련 사항)
     stop_patterns = [
-        *CALL_HEADER_PATTERNS,
-        *NEXT_SECTION_PATTERNS,
+        r"\s*10\.?\s*합병\s*관련\s*사항",
+        r"\s*11\.?\s*청약일",
+        r"\s*24\.?\s*기타\s*투자판단에"
     ]
+    
+    for stop_pat in stop_patterns:
+        m_put = re.search(stop_pat, put_text)
+        if m_put:
+            put_text = put_text[:m_put.start()]
+            
+        m_call = re.search(stop_pat, call_text)
+        if m_call:
+            call_text = call_text[:m_call.start()]
 
-    put_text = _extract_section_by_headers(option_area, PUT_HEADER_PATTERNS, stop_patterns)
-    if put_text:
-        return put_text
-
-    return _extract_section_by_headers(corpus, PUT_HEADER_PATTERNS, stop_patterns)
-
-
-# ==========================================================
-# [Call 추출]
-# - Call 헤더 뒤 ~ 다음 섹션 전
-# - 9-1 섹션에서 먼저 찾고, 없으면 전체 corpus에서 찾음
-# ==========================================================
-def extract_call_option_text(tables: List[pd.DataFrame]) -> str:
-    corpus = _option_corpus_from_tables(tables)
-    if not corpus:
-        return ""
-
-    option_area = _slice_option_major_section(corpus)
-
-    call_text = _extract_section_by_headers(option_area, CALL_HEADER_PATTERNS, NEXT_SECTION_PATTERNS)
-    if call_text:
-        return call_text
-
-    return _extract_section_by_headers(corpus, CALL_HEADER_PATTERNS, NEXT_SECTION_PATTERNS)
+    return _cleanup_option_result(put_text), _cleanup_option_result(call_text)
 
 
 # ==========================================================
-# [Call 비율 / YTC 추출]
-# - Call 본문에서 우선 추출
-# - 못 찾으면 라벨 기반 fallback 가능
+# [Call 비율 / YTC 추출 핵심 로직 (실무 정규식 적용)]
 # ==========================================================
 def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
-    text = normalize_text(text)
     if not text:
         return "", ""
 
     ratio = ""
     ytc = ""
 
-    percent_matches = re.findall(r"-?\d+(?:\.\d+)?\s*%", text)
-    percent_vals = []
-    for p in percent_matches:
-        val = parse_float_like(p)
-        if val is not None:
-            percent_vals.append((clean_percent(p), val))
-
-    explicit_ratio_patterns = [
-        r"(?:콜옵션\s*행사비율|매도청구권\s*행사비율|Call\s*비율|콜옵션\s*비율|매도청구권\s*비율|권면총액\s*대비\s*비율|행사비율)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
-        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:에\s*해당하는)?\s*(?:콜옵션|매도청구권)",
+    # 1. Call 비율 (행사비율) 추출
+    # 실무 표현: "권면총액의 50%", "전자등록총액 중 30%", "행사비율 : 50%" 등
+    ratio_patterns = [
+        r"(?:행사비율|콜옵션비율|매도청구권비율|Call\s*비율)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%",
+        r"(?:권면총액|권면액|전자등록총액|전자등록금액|인수금액|발행금액|사채원금)\s*(?:의|중)\s*(\d+(?:\.\d+)?)\s*%",
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:이내의\s*범위|에\s*해당하는|에\s*대하여\s*매도)"
     ]
-    for pat in explicit_ratio_patterns:
+    for pat in ratio_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             ratio = f"{m.group(1)}%"
             break
 
-    explicit_ytc_patterns = [
-        r"(?:YTC|Yield\s*To\s*Call|조기상환수익률|조기상환이율|연복리수익률)[^0-9\-]*(-?\d+(?:\.\d+)?)\s*%",
-        r"(-?\d+(?:\.\d+)?)\s*%\s*(?:의\s*)?(?:조기상환수익률|연복리수익률|YTC)",
+    # 2. YTC (수익률) 추출
+    # 실무 표현: "YTC : 7.0%", "연 복리 4.0%", "연 1%를 적용", "내부수익률(IRR)이 연 9.5%" 등
+    ytc_patterns = [
+        r"(?:YTC|매도청구권보장수익률|매도청구수익률|조기상환수익률|조기상환이율|연복리수익률)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%",
+        r"내부수익률\s*\(?IRR\)?\s*(?:이|은)?\s*연\s*(\d+(?:\.\d+)?)\s*%",
+        r"연\s*복리\s*(\d+(?:\.\d+)?)\s*%",
+        r"연\s*(\d+(?:\.\d+)?)\s*%\s*(?:의\s*이율|를\s*적용|로\s*계산)"
     ]
-    for pat in explicit_ytc_patterns:
+    for pat in ytc_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             ytc = f"{m.group(1)}%"
             break
 
-    if not ratio:
-        for raw, val in percent_vals:
-            if 0 < val <= 100:
-                ratio = raw
-                break
-
-    if not ytc:
-        for raw, val in percent_vals:
-            if raw == ratio:
-                continue
-            if -50 <= val <= 50:
-                ytc = raw
-                break
+    # 3. 못 찾았을 경우의 Fallback (일반적인 % 기호 매칭 중 논리적인 값)
+    if not ratio or not ytc:
+        percent_matches = re.findall(r"(\d+(?:\.\d+)?)\s*%", text)
+        for p in percent_matches:
+            val = float(p)
+            # 보통 Call 비율은 10% ~ 100% 사이의 큰 값
+            if not ratio and 10 <= val <= 100:
+                ratio = f"{p}%"
+            # 보통 YTC는 0% ~ 20% 사이의 작은 값
+            elif not ytc and 0 <= val < 15:
+                ytc = f"{p}%"
 
     return ratio, ytc
 
 
 # ==========================================================
 # [옵션 전용 레코드 파서]
-# - Put / Call / Call 비율 / YTC만 반환
 # ==========================================================
 def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     title = clean_title(rec.get("title", "") or "")
     tables = rec.get("tables", [])
-
     corr_after = extract_correction_after_map(tables) if is_correction_title(title) else {}
 
     row = {
@@ -359,24 +162,19 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
         "YTC": "",
     }
 
-    put_text = extract_put_option_text(tables)
-    call_text = extract_call_option_text(tables)
-
+    # 전체 코퍼스를 평탄화하여 가져옴
+    corpus = _option_corpus_from_tables(tables)
+    
+    # 1. Put / Call 본문 분리 추출
+    put_text, call_text = extract_put_call_texts(corpus)
     row["Put Option"] = put_text
     row["Call Option"] = call_text
 
+    # 2. 정형화된 표(Key-Value)에서 먼저 스캔 시도 (우선순위 1)
     row["Call 비율"] = _safe_percent(
         scan_label_value_preferring_correction(
             tables,
-            [
-                "콜옵션 행사비율",
-                "매도청구권 행사비율",
-                "Call 비율",
-                "콜옵션 비율",
-                "매도청구권 비율",
-                "권면총액 대비 비율",
-                "행사비율",
-            ],
+            ["콜옵션 행사비율", "매도청구권 행사비율", "Call 비율", "행사비율"],
             corr_after,
         )
     )
@@ -384,24 +182,17 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     row["YTC"] = _safe_percent(
         scan_label_value_preferring_correction(
             tables,
-            [
-                "조기상환수익률",
-                "YTC",
-                "Yield To Call",
-                "조기상환이율",
-                "조기상환수익률(%)",
-                "연복리수익률",
-            ],
+            ["조기상환수익률", "YTC", "Yield To Call", "연복리수익률", "매도청구권보장수익률"],
             corr_after,
         )
     )
 
-    # 2순위: Call 본문에서 복구
+    # 3. 표에서 못 찾았으면 Call Option 본문 텍스트에서 정규식으로 지능형 추출 (우선순위 2)
     if not row["Call 비율"] or not row["YTC"]:
-        ratio2, ytc2 = extract_call_ratio_and_ytc_from_text(call_text)
+        extracted_ratio, extracted_ytc = extract_call_ratio_and_ytc_from_text(call_text)
         if not row["Call 비율"]:
-            row["Call 비율"] = ratio2
+            row["Call 비율"] = extracted_ratio
         if not row["YTC"]:
-            row["YTC"] = ytc2
+            row["YTC"] = extracted_ytc
 
     return row
