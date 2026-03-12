@@ -3871,33 +3871,49 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
-    put_primary_val = extract_option_value_primary(tables, corr_after, "put")
-    put_column_val = extract_option_value_by_same_column(tables, "put")
-    put_section_val = extract_option_section_from_tables(tables, "put")
-    put_anchor_val = extract_option_block_by_anchor_range(tables, "put")
-    put_detail_val = extract_option_details_from_tables(tables, "put")
-    row["Put Option"] = choose_best_option_value(
-        "put",
-        put_primary_val,
-        put_column_val,
-        put_section_val,
-        put_anchor_val,
-        put_detail_val,
-    )
+# ==========================================================
+# Put / Call Option
+# 1순위: "9-1. 옵션에 관한 사항" 섹션 안의
+#        [조기상환청구권(Put Option)에 관한 사항]
+#        [매도청구권(Call Option)에 관한 사항]
+# 2순위: 기존 로직 그대로 fallback
+# ==========================================================
+
+    put_from_91 = extract_option_from_9_1_section_first(tables, "put")
+    if put_from_91:
+        row["Put Option"] = put_from_91
+    else:
+        put_primary_val = extract_option_value_primary(tables, corr_after, "put")
+        put_column_val = extract_option_value_by_same_column(tables, "put")
+        put_section_val = extract_option_section_from_tables(tables, "put")
+        put_anchor_val = extract_option_block_by_anchor_range(tables, "put")
+        put_detail_val = extract_option_details_from_tables(tables, "put")
+        row["Put Option"] = choose_best_option_value(
+            "put",
+            put_primary_val,
+            put_column_val,
+            put_section_val,
+            put_anchor_val,
+            put_detail_val,
+        )
     
-    call_primary_val = extract_option_value_primary(tables, corr_after, "call")
-    call_column_val = extract_option_value_by_same_column(tables, "call")
-    call_section_val = extract_option_section_from_tables(tables, "call")
-    call_anchor_val = extract_option_block_by_anchor_range(tables, "call")
-    call_detail_val = extract_option_details_from_tables(tables, "call")
-    row["Call Option"] = choose_best_option_value(
-        "call",
-        call_primary_val,
-        call_column_val,
-        call_section_val,
-        call_anchor_val,
-        call_detail_val,
-    )
+    call_from_91 = extract_option_from_9_1_section_first(tables, "call")
+    if call_from_91:
+        row["Call Option"] = call_from_91
+    else:
+        call_primary_val = extract_option_value_primary(tables, corr_after, "call")
+        call_column_val = extract_option_value_by_same_column(tables, "call")
+        call_section_val = extract_option_section_from_tables(tables, "call")
+        call_anchor_val = extract_option_block_by_anchor_range(tables, "call")
+        call_detail_val = extract_option_details_from_tables(tables, "call")
+        row["Call Option"] = choose_best_option_value(
+            "call",
+            call_primary_val,
+            call_column_val,
+            call_section_val,
+            call_anchor_val,
+            call_detail_val,
+        )
 
     row["Call 비율"] = clean_percent(
         scan_label_value_preferring_correction(
