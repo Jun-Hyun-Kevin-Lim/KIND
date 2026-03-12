@@ -1,13 +1,19 @@
-import os
-import json
-import time
-import random
-from typing import Dict, List, Any, Optional
+import re
+from typing import Dict, List, Tuple, Any
 
-import gspread
 import pandas as pd
-from gspread.exceptions import APIError
-from gspread.utils import rowcol_to_a1
+
+from parser import (
+    normalize_text,
+    _norm,
+    all_text_lines,
+    clean_title,
+    is_correction_title,
+    extract_correction_after_map,
+    clean_percent,
+    parse_float_like,
+    scan_label_value_preferring_correction,
+)
 
 # ==========================================================
 # [환경변수]
