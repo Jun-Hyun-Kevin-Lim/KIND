@@ -84,9 +84,6 @@ def _find_first_match(text: str, patterns: List[str]):
 
 
 def _find_next_heading_start(text: str, start_pos: int) -> int:
-    """
-    다음 큰 섹션 시작점을 찾는다.
-    """
     heading_patterns = [
         r"(?:^|\n)\s*9\s*[-\.]?\s*2\s*[\)\.]?\s+",
         r"(?:^|\n)\s*9\s*[-\.]?\s*3\s*[\)\.]?\s+",
@@ -322,7 +319,6 @@ def extract_put_call_texts(corpus: str) -> Tuple[str, str]:
     put_text = ""
     call_text = ""
 
-    # 1) 9-1 우선
     section_91 = _extract_91_option_section(corpus)
     if section_91:
         p91, c91 = _extract_put_call_from_block(section_91)
@@ -331,7 +327,6 @@ def extract_put_call_texts(corpus: str) -> Tuple[str, str]:
         if c91:
             call_text = c91
 
-        # 2) 9-1에 22/23 참조가 있으면 그쪽도 탐색
         if _has_reference_to_22_23(section_91):
             ref_sections = _extract_22_23_reference_sections(corpus)
             for sec in ref_sections:
@@ -345,7 +340,6 @@ def extract_put_call_texts(corpus: str) -> Tuple[str, str]:
                 if put_text and call_text:
                     break
 
-    # 3) 9-1에서 못 찾았으면 22/23 단독 탐색
     if not put_text or not call_text:
         ref_sections = _extract_22_23_reference_sections(corpus)
         for sec in ref_sections:
@@ -428,13 +422,11 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
 
     corpus = _option_corpus_from_tables(tables)
 
-    # 1. Put / Call 본문 추출
     put_text, call_text = extract_put_call_texts(corpus)
 
     row["Put Option"] = put_text if put_text else "공시 확인 바람"
     row["Call Option"] = call_text if call_text else "공시 확인 바람"
 
-    # 2. 표(Key-Value) 우선 추출
     row["Call 비율"] = _safe_percent(
         scan_label_value_preferring_correction(
             tables,
@@ -462,8 +454,6 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
         )
     )
 
-    # 3. 표에서 못 찾았으면 Call 본문에서 fallback
-    #    단, "공시 확인 바람"으로 바뀌기 전의 raw call_text 기준으로 본다.
     if not row["Call 비율"] or not row["YTC"]:
         extracted_ratio, extracted_ytc = extract_call_ratio_and_ytc_from_text(call_text)
 
