@@ -1133,6 +1133,182 @@ def extract_issue_shares_and_type(
 
     return None, "보통주식"
 
+def extract_issue_shares_and_type_section1_exact(
+    dfs: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+) -> Tuple[Optional[int], str]:
+    """
+    '1. 신주의 종류와 수' 섹션만 정확히 읽는 보정 로직
+    """
+
+    def _first_nonempty_cell(row_vals) -> str:
+        for x in row_vals:
+            s = normalize_text(x)
+            if s:
+                return s
+        return ""
+
+    def _is_section1_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        n = _norm(raw)
+        if not raw:
+            return False
+
+        patterns = [
+            r"^1[\.\)]?신주의종류와수$",
+            r"^1[\.\)]?신주의종류와수\(주\)$",
+            r"^1[\.\)]?신주의\s*종류와\s*수$",
+        ]
+        if any(re.match(p, n) for p in patterns):
+            return True
+        if "1신주의종류와수" in n:
+            return True
+        return False
+
+    def _is_new_top_heading(text: str) -> bool:
+        raw = normalize_text(text)
+        if not raw:
+            return False
+        return bool(re.match(r"^\d+\s*[\.\)]\s*[가-힣A-Za-z]", raw))
+
+    def _extract_num_from_row_by_label(row_vals: List[str], label_kws: List[str]) -> Optional[int]:
+        cleaned = [normalize_text(x) for x in row_vals]
+        normed = [_norm(x) for x in cleaned]
+
+        label_kws_norm = [_norm(x) for x in label_kws]
+
+        for i, cell in enumerate(normed):
+            if any(kw in cell for kw in label_kws_norm):
+                for cand in cleaned[i + 1:]:
+                    v = _to_int(cand)
+                    if v is not None and v > 0:
+                        return v
+
+                for j, cand in enumerate(cleaned):
+                    if j == i:
+                        continue
+                    v = _to_int(cand)
+                    if v is not None and v > 0:
+                        return v
+        return None
+
+    # 1순위: 정정공시
+    if corr_after:
+        for k, v in corr_after.items():
+            if _is_section1_heading(k):
+                txt = normalize_text(v)
+                common = None
+                other = None
+                total = None
+
+                m = re.search(r"보통주식\s*\(\s*주\s*\)\s*[:：]?\s*([0-9][0-9,]*)", txt)
+                if m:
+                    common = int(m.group(1).replace(",", ""))
+
+                m = re.search(r"(?:기타주식|종류주식|우선주식)\s*\(\s*주\s*\)\s*[:：]?\s*([0-9][0-9,]*)", txt)
+                if m:
+                    other = int(m.group(1).replace(",", ""))
+
+                m = re.search(r"(?:합계|총계|계)\s*[:：]?\s*([0-9][0-9,]*)", txt)
+                if m:
+                    total = int(m.group(1).replace(",", ""))
+
+                amt = total if total else (common or 0) + (other or 0)
+                if amt > 0:
+                    if other and not common:
+                        return amt, "우선주식"
+                    if common and not other:
+                        return amt, "보통주식"
+                    if common and other:
+                        return amt, "보통주식, 우선주식"
+                    return amt, "보통주식"
+
+    # 2순위: 실제 표
+    for df in dfs:
+        try:
+            arr = df.fillna("").astype(str).values
+        except Exception:
+            continue
+
+        R, C = arr.shape
+        for r in range(R):
+            row_list = arr[r].tolist()
+            first_cell = _first_nonempty_cell(row_list)
+            row_join = " ".join([normalize_text(x) for x in row_list if normalize_text(x)])
+
+            if not (_is_section1_heading(first_cell) or _is_section1_heading(row_join)):
+                continue
+
+            common = None
+            other = None
+            total = None
+            joined_txt = []
+
+            for rr in range(r, min(r + 8, R)):
+                next_row = [normalize_text(x) for x in arr[rr].tolist()]
+                next_first = _first_nonempty_cell(next_row)
+
+                if rr > r and _is_new_top_heading(next_first):
+                    break
+
+                row_text = " ".join([x for x in next_row if x])
+                if row_text:
+                    joined_txt.append(row_text)
+
+                if common is None:
+                    common = _extract_num_from_row_by_label(next_row, ["보통주식", "보통주"])
+
+                if other is None:
+                    other = _extract_num_from_row_by_label(
+                        next_row,
+                        ["기타주식", "종류주식", "우선주식", "기타주", "종류주", "우선주"],
+                    )
+
+                if total is None:
+                    total = _extract_num_from_row_by_label(next_row, ["합계", "총계", "계"])
+
+            amt = total if total else (common or 0) + (other or 0)
+            if amt > 0:
+                if other and not common:
+                    return amt, "우선주식"
+                if common and not other:
+                    return amt, "보통주식"
+                if common and other:
+                    return amt, "보통주식, 우선주식"
+
+                joined_norm = _norm(" ".join(joined_txt))
+                if "우선" in joined_norm or "종류" in joined_norm or "기타" in joined_norm:
+                    return amt, "보통주식, 우선주식" if "보통" in joined_norm else "우선주식"
+                return amt, "보통주식"
+
+    return None, ""
+
+
+def choose_issue_shares_and_type(
+    dfs: List[pd.DataFrame],
+    corr_after: Dict[str, str],
+) -> Tuple[Optional[int], str]:
+    """
+    기존 로직 + 1번 섹션 exact 로직을 같이 돌리고
+    필요할 때만 새 로직으로 보정
+    """
+    old_amt, old_type = extract_issue_shares_and_type(dfs, corr_after)
+    new_amt, new_type = extract_issue_shares_and_type_section1_exact(dfs, corr_after)
+
+    if old_amt and not new_amt:
+        return old_amt, old_type
+
+    if new_amt and not old_amt:
+        return new_amt, (new_type or old_type or "보통주식")
+
+    if not old_amt and not new_amt:
+        return None, (old_type or new_type or "보통주식")
+
+    if old_amt == new_amt:
+        return old_amt, (old_type or new_type or "보통주식")
+
+    # 둘이 다르면 1. 신주의 종류와 수 섹션 전용 보정값 우선
+    return new_amt, (new_type or old_type or "보통주식")
 
 # [증자전 주식수 추출]
 # - '증자전발행주식총수' 계열 표를 읽어서 총 발행주식수 추출
@@ -3536,7 +3712,7 @@ def parse_rights_record(rec: Dict[str, Any]):
         corr_after,
     )
 
-    issue_shares, issue_type = extract_issue_shares_and_type(tables, corr_after)
+    issue_shares, issue_type = choose_issue_shares_and_type(tables, corr_after)
     if issue_shares:
         row["신규발행주식수"] = fmt_number(issue_shares)
     if issue_type:
