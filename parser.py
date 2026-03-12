@@ -2148,17 +2148,13 @@ def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) 
 
     return _single_line(", ".join(final_investors[:15]))
 
-
-# ==========================================================
-# [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
 # ==========================================================
 # [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
 # - 신규 우선순위:
-#   0) "9-1. 옵션에 관한 사항" 섹션을 먼저 찾고
-#      그 안에서
-#      - Put  : [조기상환청구권(Put Option)에 관한 사항]
-#      - Call : [매도청구권(Call Option)에 관한 사항]
-#      를 먼저 추출
+#   0) 구조 섹션 우선
+#      - 9-1. 옵션에 관한 사항
+#      - (2) 옵션에 관한 사항 / 2) 옵션에 관한 사항
+#      - 22/23/24. 기타 투자판단에 참고할 사항
 #   1) 병렬 2열형 (Put / Call 좌우 분리)
 #   2) 라벨-값형
 #   3) 단일 text 세로형
@@ -2662,6 +2658,159 @@ def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
     return best
 
 
+def _option_major_end_patterns() -> List[str]:
+    return [
+        r"\n\s*9\s*-\s*2\s*[\.\)]",
+        r"\n\s*10\s*[\.\)]",
+        r"\n\s*22\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
+        r"\n\s*23\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
+        r"\n\s*24\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
+        r"\n\s*24\s*[\.\)]\s*정관에\s*정한\s*신주인수권의\s*내용",
+        r"\n\s*25\s*[\.\)]",
+        r"\n\s*【",
+        r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
+    ]
+
+
+def _option_put_header_patterns() -> List[str]:
+    return [
+        r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*Put\s*Option\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*PUT\s*OPTION\s*\]",
+        r"\[\s*Put\s*Option\s*\]",
+        r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항",
+        r"1\.\s*사채권자\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)",
+        r"1\)\s*사채의\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"\(1\)\s*사채의\s*만기전\s*조기상환청구권\s*\(\s*Put[\-\s]*Option\s*\)",
+        r"가\.\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"풋옵션",
+        r"Put\s*Option",
+    ]
+
+
+def _option_call_header_patterns() -> List[str]:
+    return [
+        r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*중도상환청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*Call\s*Option\s*에\s*관한\s*사항\s*\]",
+        r"\[\s*CALL\s*OPTION\s*\]",
+        r"\[\s*Call\s*Option\s*\]",
+        r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항",
+        r"중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"중도상환청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항",
+        r"2\.\s*발행회사의\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)",
+        r"2\)\s*발행회사의\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"\(2\)\s*콜옵션에\s*관한\s*사항",
+        r"나\.\s*중도상환청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"나\.\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
+        r"콜옵션",
+        r"Call\s*Option",
+    ]
+
+
+def _collect_option_candidate_sections(corpus: str) -> List[str]:
+    if not corpus:
+        return []
+
+    sections = []
+    end_patterns = _option_major_end_patterns()
+
+    sec_91 = _slice_block_from_heading(
+        corpus,
+        [
+            r"9\s*-\s*1\s*[\.\)]\s*옵션에\s*관한\s*사항",
+        ],
+        end_patterns,
+    )
+    if sec_91:
+        sections.append(sec_91)
+
+    sec_num2 = _slice_block_from_heading(
+        corpus,
+        [
+            r"\(\s*2\s*\)\s*옵션에\s*관한\s*사항",
+            r"2\)\s*옵션에\s*관한\s*사항",
+        ],
+        end_patterns,
+    )
+    if sec_num2:
+        sections.append(sec_num2)
+
+    for no in ["22", "23", "24"]:
+        sec = _slice_block_from_heading(
+            corpus,
+            [
+                rf"{no}\s*[\.\)]\s*기타\s*투자판단에\s*참고할\s*사항",
+                rf"{no}\s*[\.\)]\s*기타\s*투자판단에\s*참고할사항",
+            ],
+            end_patterns,
+        )
+        if sec and re.search(
+            r"Put\s*Option|Call\s*Option|조기상환청구권|매도청구권|중도상환청구권|풋옵션|콜옵션",
+            sec,
+            flags=re.I,
+        ):
+            sections.append(sec)
+
+    out = []
+    seen = set()
+    for sec in sections:
+        key = _norm(sec)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(sec)
+
+    return out
+
+
+def _extract_option_from_section_text(section_text: str, option_type: str) -> str:
+    if not section_text:
+        return ""
+
+    option_key = (option_type or "").strip().lower()
+
+    put_headers = _option_put_header_patterns()
+    call_headers = _option_call_header_patterns()
+    major_ends = _option_major_end_patterns()
+
+    if option_key == "put":
+        start_patterns = put_headers
+        stop_patterns = call_headers + major_ends
+    else:
+        start_patterns = call_headers
+        stop_patterns = major_ends
+
+    start_hit = _find_first_regex_match(section_text, start_patterns)
+    if not start_hit:
+        return ""
+
+    start_pos = section_text.rfind("\n", 0, start_hit[0]) + 1
+    sub = section_text[start_pos:]
+
+    search_from = max(1, start_hit[1] - start_pos)
+    stop_hit = _find_first_regex_match(sub, stop_patterns, start_pos=search_from)
+
+    end_pos = len(sub)
+    if stop_hit:
+        stop_line_start = sub.rfind("\n", 0, stop_hit[0])
+        end_pos = stop_line_start if stop_line_start > 0 else stop_hit[0]
+
+    candidate = _option_trim_to_body(sub[:end_pos].strip(), option_key)
+    if not candidate:
+        return ""
+
+    if not _is_option_candidate_type_valid(candidate, option_key):
+        return ""
+
+    return candidate
+
+
 def _first_pattern_pos(text: str, patterns: List[str]) -> Optional[int]:
     if not text:
         return None
@@ -2722,66 +2871,31 @@ def extract_option_from_9_1_section_first(
     tables: List[pd.DataFrame],
     option_type: str,
 ) -> str:
+    """
+    이름은 그대로 두지만 실제로는
+    1) 9-1. 옵션에 관한 사항
+    2) (2) 옵션에 관한 사항 / 2) 옵션에 관한 사항
+    3) 22/23/24 기타 투자판단에 참고할 사항
+    까지 확장해서 Put/Call을 구조적으로 먼저 추출한다.
+    """
     corpus = _option_corpus_from_tables(tables)
     if not corpus:
         return ""
 
-    section_91 = _slice_exact_9_1_option_section(corpus)
-    if not section_91:
+    sections = _collect_option_candidate_sections(corpus)
+    if not sections:
         return ""
 
-    option_key = (option_type or "").strip().lower()
-    if option_key == "put":
-        start_patterns = [
-            r"\[\s*조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"\[\s*조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"조기상환청구권\s*\(\s*Put\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"조기상환청구권\s*\(\s*PUT\s*OPTION\s*\)\s*에\s*관한\s*사항",
-        ]
-        stop_patterns = [
-            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항",
-            r"\n\s*9\s*-\s*2\s*[\.\)]",
-            r"\n\s*10\s*[\.\)]",
-            r"\n\s*【",
-        ]
-    else:
-        start_patterns = [
-            r"\[\s*매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"\[\s*매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
-            r"매도청구권\s*\(\s*Call\s*Option\s*\)\s*에\s*관한\s*사항",
-            r"매도청구권\s*\(\s*CALL\s*OPTION\s*\)\s*에\s*관한\s*사항",
-        ]
-        stop_patterns = [
-            r"\n\s*9\s*-\s*2\s*[\.\)]",
-            r"\n\s*10\s*[\.\)]",
-            r"\n\s*【",
-        ]
+    candidates = []
+    for sec in sections:
+        cand = _extract_option_from_section_text(sec, option_type)
+        if cand:
+            candidates.append(cand)
 
-    start_hit = _find_first_regex_match(section_91, start_patterns)
-    if not start_hit:
+    if not candidates:
         return ""
 
-    start_pos = section_91.rfind("\n", 0, start_hit[0]) + 1
-    sub = section_91[start_pos:]
-
-    stop_hit = _find_first_regex_match(sub, stop_patterns, start_pos=20)
-    end_pos = len(sub)
-
-    if stop_hit:
-        stop_line_start = sub.rfind("\n", 0, stop_hit[0])
-        end_pos = stop_line_start if stop_line_start > 0 else stop_hit[0]
-
-    candidate = _option_trim_to_body(sub[:end_pos].strip(), option_key)
-    if not candidate:
-        return ""
-
-    if not _is_option_candidate_type_valid(candidate, option_key):
-        return ""
-
-    return candidate
+    return choose_best_option_value(option_type, *candidates)
 
 
 def extract_option_from_parallel_columns(
@@ -3814,9 +3928,7 @@ def parse_bond_record(rec: Dict[str, Any]):
 
     # ==========================================================
     # Put / Call Option
-    # 1순위: "9-1. 옵션에 관한 사항" 섹션 안의
-    #        [조기상환청구권(Put Option)에 관한 사항]
-    #        [매도청구권(Call Option)에 관한 사항]
+    # 1순위: 구조 섹션 기반 추출
     # 2순위: 기존 로직 그대로 fallback
     # ==========================================================
     
