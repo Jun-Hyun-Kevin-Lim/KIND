@@ -63,6 +63,10 @@ jobs:
         run: |
           python main_parse.py
 
+      - name: Run option parser
+        run: |
+          python main_option.py
+
       - name: Run validator
         run: |
           python validator.py
