@@ -1,165 +1,360 @@
-import gspread
-from typing import Dict, Any
+import os
+import json
+import time
+import random
+from typing import Dict, List, Any, Optional
 
-from parser import (
-    gs_open,
-    ensure_ws,
-    ensure_header,
-    load_raw_records,
-    clean_title,
-    normalize_text,
-    safe_cell,
-    find_row_by_key,
-    RAW_SHEET_NAME,
-    BOND_SHEET_NAME,
-    BOND_HEADERS,
-    RUN_ONLY_ACPTNO,
-)
+import gspread
+import pandas as pd
+from gspread.exceptions import APIError
+from gspread.utils import rowcol_to_a1
+
 from bond_option_parser import parse_bond_option_record
 
 
 # ==========================================================
-# [옵션 전용 업데이트 대상 컬럼]
-# - Put / Call 관련 컬럼만 부분 업데이트
+# [환경변수]
 # ==========================================================
-OPTION_HEADERS = [
-    "Put Option",
-    "Call Option",
-    "Call 비율",
-    "YTC",
-]
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "").strip()
+GOOGLE_CREDENTIALS_JSON = (
+    os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    or os.environ.get("GOOGLE_CREDS", "").strip()
+)
+
+RAW_SHEET_NAME = os.getenv("DUMP_SHEET_NAME", "RAW_dump")
+BOND_SHEET_NAME = os.getenv("BOND_SHEET_NAME", "주식연계채권")
+
+RUN_ONLY_ACPTNO = os.getenv("RUN_ONLY_ACPTNO", "").strip()
 
 
 # ==========================================================
-# [옵션 컬럼만 부분 업데이트]
-# - 접수번호 기준으로 기존 행을 찾아
-# - Put Option ~ YTC 4개 컬럼만 업데이트
-# - 새 값이 비어 있으면 기존 값을 유지
+# [헤더 후보]
 # ==========================================================
-def update_option_fields_only(
+RAW_ACPTNO_CANDIDATES = ["접수번호", "acptNo", "acptno"]
+RAW_TITLE_CANDIDATES = ["보고서명", "title", "공시명"]
+RAW_TABLES_CANDIDATES = ["tables", "테이블"]
+
+BOND_ACPTNO_CANDIDATES = ["접수번호", "acptNo", "acptno"]
+
+PUT_COL_CANDIDATES = ["Put Option", "Put옵션", "Put"]
+CALL_COL_CANDIDATES = ["Call Option", "Call옵션", "Call"]
+CALL_RATIO_COL_CANDIDATES = ["Call 비율", "콜옵션 비율"]
+YTC_COL_CANDIDATES = ["YTC"]
+
+
+# ==========================================================
+# [Google Sheets retry]
+# ==========================================================
+def gs_retry(fn, *args, **kwargs):
+    last_err = None
+    for attempt in range(6):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as e:
+            last_err = e
+            msg = str(e)
+            if "429" in msg or "Quota exceeded" in msg:
+                sleep_s = (2 ** attempt) + random.uniform(0.3, 1.2)
+                time.sleep(sleep_s)
+                continue
+            raise
+    raise last_err if last_err else RuntimeError("Unknown Google Sheets error")
+
+
+# ==========================================================
+# [공통 유틸]
+# ==========================================================
+def _require_env(name: str, value: str):
+    if not value:
+        raise RuntimeError(f"환경변수 누락: {name}")
+
+
+def _normalize_header(s: Any) -> str:
+    return str(s).strip()
+
+
+def _header_to_col_map(header_row: List[Any]) -> Dict[str, int]:
+    out = {}
+    for i, h in enumerate(header_row, start=1):
+        key = _normalize_header(h)
+        if key:
+            out[key] = i
+    return out
+
+
+def _find_col(header_map: Dict[str, int], candidates: List[str]) -> Optional[int]:
+    for c in candidates:
+        if c in header_map:
+            return header_map[c]
+    return None
+
+
+def _row_to_dict(header_row: List[Any], row: List[Any]) -> Dict[str, Any]:
+    out = {}
+    max_len = max(len(header_row), len(row))
+    for i in range(max_len):
+        k = header_row[i] if i < len(header_row) else f"__extra_{i}"
+        v = row[i] if i < len(row) else ""
+        out[str(k).strip()] = v
+    return out
+
+
+def _first_nonempty_from_dict(d: Dict[str, Any], keys: List[str]) -> str:
+    for k in keys:
+        v = d.get(k, "")
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+# ==========================================================
+# [tables 파싱]
+# ==========================================================
+def _to_dataframe(obj: Any) -> Optional[pd.DataFrame]:
+    try:
+        if isinstance(obj, pd.DataFrame):
+            return obj
+        if isinstance(obj, dict):
+            if "data" in obj and isinstance(obj["data"], list):
+                return pd.DataFrame(obj["data"])
+            if "rows" in obj and isinstance(obj["rows"], list):
+                return pd.DataFrame(obj["rows"])
+            return pd.DataFrame(obj)
+        if isinstance(obj, list):
+            return pd.DataFrame(obj)
+    except Exception:
+        return None
+    return None
+
+
+def _parse_tables_cell(cell: Any) -> List[pd.DataFrame]:
+    if cell is None:
+        return []
+
+    if isinstance(cell, list):
+        raw = cell
+    else:
+        s = str(cell).strip()
+        if not s:
+            return []
+        try:
+            raw = json.loads(s)
+        except Exception:
+            return []
+
+    if not isinstance(raw, list):
+        return []
+
+    out: List[pd.DataFrame] = []
+    for item in raw:
+        df = _to_dataframe(item)
+        if df is not None:
+            out.append(df)
+    return out
+
+
+# ==========================================================
+# [워크시트 열기]
+# ==========================================================
+def open_worksheets():
+    _require_env("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)
+    _require_env("GOOGLE_CREDENTIALS_JSON", GOOGLE_CREDENTIALS_JSON)
+
+    creds = json.loads(GOOGLE_CREDENTIALS_JSON)
+    gc = gspread.service_account_from_dict(creds)
+    sh = gs_retry(gc.open_by_key, GOOGLE_SHEET_ID)
+
+    raw_ws = gs_retry(sh.worksheet, RAW_SHEET_NAME)
+    bond_ws = gs_retry(sh.worksheet, BOND_SHEET_NAME)
+    return raw_ws, bond_ws
+
+
+# ==========================================================
+# [RAW_dump 전체 읽기]
+# ==========================================================
+def load_raw_records(raw_ws) -> List[Dict[str, Any]]:
+    values = gs_retry(raw_ws.get_all_values)
+    if not values:
+        return []
+
+    header = values[0]
+    rows = values[1:]
+
+    records = []
+    for row in rows:
+        d = _row_to_dict(header, row)
+
+        acptno = _first_nonempty_from_dict(d, RAW_ACPTNO_CANDIDATES)
+        title = _first_nonempty_from_dict(d, RAW_TITLE_CANDIDATES)
+
+        tables_cell = ""
+        for key in RAW_TABLES_CANDIDATES:
+            if key in d:
+                tables_cell = d.get(key, "")
+                break
+
+        if not acptno or not title:
+            continue
+
+        tables = _parse_tables_cell(tables_cell)
+        records.append(
+            {
+                "acptNo": acptno,
+                "title": title,
+                "tables": tables,
+            }
+        )
+
+    return records
+
+
+# ==========================================================
+# [주식연계채권 시트 전체 읽기 + row map]
+# ==========================================================
+def build_bond_sheet_context(bond_ws):
+    values = gs_retry(bond_ws.get_all_values)
+    if not values:
+        raise RuntimeError(f"{BOND_SHEET_NAME} 시트가 비어 있음")
+
+    header = values[0]
+    rows = values[1:]
+    header_map = _header_to_col_map(header)
+
+    acptno_col = _find_col(header_map, BOND_ACPTNO_CANDIDATES)
+    put_col = _find_col(header_map, PUT_COL_CANDIDATES)
+    call_col = _find_col(header_map, CALL_COL_CANDIDATES)
+    ratio_col = _find_col(header_map, CALL_RATIO_COL_CANDIDATES)
+    ytc_col = _find_col(header_map, YTC_COL_CANDIDATES)
+
+    missing = []
+    if not acptno_col:
+        missing.append("접수번호")
+    if not put_col:
+        missing.append("Put Option")
+    if not call_col:
+        missing.append("Call Option")
+    if not ratio_col:
+        missing.append("Call 비율")
+    if not ytc_col:
+        missing.append("YTC")
+
+    if missing:
+        raise RuntimeError(f"{BOND_SHEET_NAME} 시트 헤더 누락: {', '.join(missing)}")
+
+    row_map: Dict[str, int] = {}
+    for i, row in enumerate(rows, start=2):
+        acptno = ""
+        if len(row) >= acptno_col:
+            acptno = str(row[acptno_col - 1]).strip()
+        if acptno:
+            row_map[acptno] = i
+
+    return {
+        "row_map": row_map,
+        "put_col": put_col,
+        "call_col": call_col,
+        "ratio_col": ratio_col,
+        "ytc_col": ytc_col,
+    }
+
+
+# ==========================================================
+# [1행 업데이트]
+# - batch_update 사용
+# ==========================================================
+def update_option_row(
     ws,
-    headers,
-    acpt_no: str,
-    option_row: Dict[str, Any],
+    row_num: int,
+    put_col: int,
+    call_col: int,
+    ratio_col: int,
+    ytc_col: int,
+    parsed: Dict[str, str],
 ):
-    target_row = find_row_by_key(ws, "접수번호", str(acpt_no))
-    if not target_row:
-        return "SKIP_NO_BASE_ROW", None
-
-    for h in OPTION_HEADERS:
-        if h not in headers:
-            raise RuntimeError(f"BOND_HEADERS에 '{h}' 컬럼이 없습니다.")
-
-    existing = ws.row_values(target_row)
-
-    final_values = []
-    for h in OPTION_HEADERS:
-        idx = headers.index(h)
-        old_val = safe_cell(existing, idx)
-        new_val = normalize_text(option_row.get(h, ""))
-
-        # 새 값이 있으면 새 값으로, 없으면 기존 값 유지
-        final_values.append(new_val if new_val else old_val)
-
-    start_col = headers.index("Put Option") + 1
-    end_col = headers.index("YTC") + 1
-
-    start_a1 = gspread.utils.rowcol_to_a1(target_row, start_col)
-    end_a1 = gspread.utils.rowcol_to_a1(target_row, end_col)
-
-    ws.update(f"{start_a1}:{end_a1}", [final_values])
-    return "UPDATE", target_row
+    data = [
+        {
+            "range": rowcol_to_a1(row_num, put_col),
+            "values": [[parsed.get("Put Option", "")]],
+        },
+        {
+            "range": rowcol_to_a1(row_num, call_col),
+            "values": [[parsed.get("Call Option", "")]],
+        },
+        {
+            "range": rowcol_to_a1(row_num, ratio_col),
+            "values": [[parsed.get("Call 비율", "")]],
+        },
+        {
+            "range": rowcol_to_a1(row_num, ytc_col),
+            "values": [[parsed.get("YTC", "")]],
+        },
+    ]
+    gs_retry(ws.batch_update, data)
 
 
 # ==========================================================
-# [주식연계채권 공시 여부 판단]
+# [메인]
 # ==========================================================
-def is_bond_title(title: str) -> bool:
-    t = title.replace(" ", "")
-    return any(
-        k in t
-        for k in [
-            "전환사채권발행결정",
-            "교환사채권발행결정",
-            "신주인수권부사채권발행결정",
-        ]
-    )
+def main():
+    raw_ws, bond_ws = open_worksheets()
+    raw_records = load_raw_records(raw_ws)
+    ctx = build_bond_sheet_context(bond_ws)
+    row_map = ctx["row_map"]
 
-
-# ==========================================================
-# [옵션 전용 러너]
-# - RAW_dump 로드
-# - bond 공시만 대상으로 Put / Call 로직 실행
-# - 기존 bond 시트의 옵션 4개 컬럼만 갱신
-# ==========================================================
-def run_option_parser():
-    sh = gs_open()
-
-    raw_ws = ensure_ws(sh, RAW_SHEET_NAME, rows=5000, cols=250)
-    bond_ws = ensure_ws(sh, BOND_SHEET_NAME, rows=3000, cols=max(40, len(BOND_HEADERS) + 5))
-
-    ensure_header(bond_ws, BOND_HEADERS)
-
-    records = load_raw_records(raw_ws)
     if RUN_ONLY_ACPTNO:
-        records = [r for r in records if r["acpt_no"] == RUN_ONLY_ACPTNO]
-
-    if not records:
-        print("[INFO] RAW_dump에 옵션 파싱할 데이터가 없습니다.")
-        return
+        raw_records = [r for r in raw_records if r.get("acptNo") == RUN_ONLY_ACPTNO]
 
     ok = 0
-    skip = 0
     fail = 0
 
-    for rec in records:
-        acpt_no = rec["acpt_no"]
-        title = clean_title(rec.get("title", "") or "")
+    for rec in raw_records:
+        acptno = str(rec.get("acptNo", "")).strip()
+        title = str(rec.get("title", "")).strip()
 
-        if not is_bond_title(title):
+        if not acptno:
+            continue
+
+        row_num = row_map.get(acptno)
+        if not row_num:
             continue
 
         try:
-            option_row = parse_bond_option_record(rec)
+            parsed = parse_bond_option_record(rec)
 
-            has_any_option_value = any(
-                normalize_text(option_row.get(h, ""))
-                for h in OPTION_HEADERS
-            )
+            if not str(parsed.get("Put Option", "")).strip():
+                parsed["Put Option"] = "공시 확인 바람"
+            if not str(parsed.get("Call Option", "")).strip():
+                parsed["Call Option"] = "공시 확인 바람"
 
-            if not has_any_option_value:
-                skip += 1
-                print(f"[SKIP][OPTION][EMPTY] {acpt_no} {title}")
-                continue
-
-            mode, rownum = update_option_fields_only(
+            update_option_row(
                 bond_ws,
-                BOND_HEADERS,
-                acpt_no,
-                option_row,
+                row_num=row_num,
+                put_col=ctx["put_col"],
+                call_col=ctx["call_col"],
+                ratio_col=ctx["ratio_col"],
+                ytc_col=ctx["ytc_col"],
+                parsed=parsed,
             )
 
-            if mode == "SKIP_NO_BASE_ROW":
-                skip += 1
-                print(f"[SKIP][OPTION][NO_BASE_ROW] {acpt_no} {title}")
-                continue
+            put_found = parsed["Put Option"] != "공시 확인 바람"
+            call_found = parsed["Call Option"] != "공시 확인 바람"
 
-            ok += 1
             print(
-                f"[OK][OPTION][{mode}] {acpt_no} {title} "
-                f"(row={rownum}, put={'Y' if option_row.get('Put Option') else 'N'}, "
-                f"call={'Y' if option_row.get('Call Option') else 'N'})"
+                f"[OK][OPTION][UPDATE] {acptno} {title} "
+                f"(row={row_num}, put={'Y' if put_found else 'N'}, call={'Y' if call_found else 'N'})"
             )
+            ok += 1
+            time.sleep(0.15)
 
         except Exception as e:
+            print(f"[FAIL][OPTION] {acptno} {title} :: {e}")
             fail += 1
-            print(f"[FAIL][OPTION] {acpt_no} {title} :: {e}")
 
-    print(f"[DONE][OPTION] ok={ok} skip={skip} fail={fail}")
+    print(f"[DONE][OPTION] ok={ok} fail={fail}")
 
 
-# ==========================================================
-# [직접 실행 진입점]
-# ==========================================================
 if __name__ == "__main__":
-    run_option_parser()
+    main()
