@@ -1537,8 +1537,9 @@ def get_price_by_exact_section(
     2) 실제 표에서 '6. 신주 발행가액' 섹션 블록 스캔
 
     규칙
-    - '보통주식 (원)' 값을 최우선으로 추출
-    - 없으면 같은 6번 섹션 안의 첫 유효 가격을 사용
+    - '확정발행가' / '정정후' / '변경후' 영역을 최우선으로 본다
+    - 같은 줄에 예정발행가 + 확정발행가가 같이 있으면 확정발행가를 우선
+    - 그 다음 보통주식(원) 값 중 마지막 값을 우선
     - 다른 섹션 / 일반 발행가액 라벨 fallback 금지
     """
 
@@ -1623,25 +1624,79 @@ def get_price_by_exact_section(
 
         return None
 
-    # [추가] 정정후 / 변경후가 같이 있을 때는 뒤쪽 값을 우선
+    def _extract_last_common_stock_price(text: str) -> Optional[int]:
+        if not text:
+            return None
+
+        txt = normalize_text(text)
+        patterns = [
+            r"보통주식\s*\(\s*원\s*\)\s*[:：]?\s*([0-9][0-9,]*)",
+            r"보통주식\s*[:：]?\s*([0-9][0-9,]*)",
+            r"보통주\s*\(\s*원\s*\)\s*[:：]?\s*([0-9][0-9,]*)",
+            r"보통주\s*[:：]?\s*([0-9][0-9,]*)",
+        ]
+
+        hits = []
+        for pat in patterns:
+            for m in re.finditer(pat, txt):
+                try:
+                    v = int(m.group(1).replace(",", ""))
+                    if v >= 50:
+                        hits.append((m.start(), v))
+                except Exception:
+                    pass
+
+        if not hits:
+            return None
+
+        hits.sort(key=lambda x: x[0])
+        return hits[-1][1]
+
+    def _extract_price_after_markers(text: str, markers: List[str]) -> Optional[int]:
+        if not text:
+            return None
+
+        txt = normalize_text(text)
+
+        positions = []
+        for marker in markers:
+            for m in re.finditer(marker, txt, flags=re.IGNORECASE):
+                positions.append(m.end())
+
+        if not positions:
+            return None
+
+        positions.sort(reverse=True)
+
+        for pos in positions:
+            sub = txt[pos:]
+            v = _extract_common_stock_price_from_text(sub)
+            if v is not None:
+                return v
+
+            vals = _extract_valid_prices(sub)
+            if vals:
+                return vals[0]
+
+        return None
+
     def _extract_price_preferring_after(text: str) -> Optional[int]:
         if not text:
             return None
 
         txt = normalize_text(text)
 
-        for marker in ["정정후", "변경후"]:
-            if marker in txt:
-                after_txt = txt.split(marker, 1)[1]
+        # 1) 정정후 / 변경후 우선
+        v = _extract_price_after_markers(txt, [r"정정후", r"변경후"])
+        if v is not None:
+            return v
 
-                v = _extract_common_stock_price_from_text(after_txt)
-                if v is not None:
-                    return v
+        # 2) 확정발행가 / 확정발행가액 우선
+        v = _extract_price_after_markers(txt, [r"확정발행가액", r"확정발행가"])
+        if v is not None:
+            return v
 
-                vals = _extract_valid_prices(after_txt)
-                if vals:
-                    return vals[0]
-
+        # 3) 일반 보통주식 가격
         v = _extract_common_stock_price_from_text(txt)
         if v is not None:
             return v
@@ -1653,60 +1708,74 @@ def get_price_by_exact_section(
         return None
 
     def _extract_price_from_block_rows(block_rows: List[List[str]]) -> Optional[int]:
-        # 1순위: 보통주식(원) 근처 숫자
+        row_texts = [
+            " ".join([normalize_text(x) for x in row if normalize_text(x)])
+            for row in block_rows
+        ]
+        block_text = " ".join([x for x in row_texts if x])
+
+        # 1순위: 각 행에서 정정후 / 변경후 / 확정발행가 뒤쪽 값
+        for row_text in row_texts:
+            if not row_text:
+                continue
+
+            v = _extract_price_after_markers(
+                row_text,
+                [r"정정후", r"변경후", r"확정발행가액", r"확정발행가"],
+            )
+            if v is not None:
+                return v
+
+        # 2순위: 블록 전체에서 정정후 / 변경후 / 확정발행가 뒤쪽 값
+        v = _extract_price_after_markers(
+            block_text,
+            [r"정정후", r"변경후", r"확정발행가액", r"확정발행가"],
+        )
+        if v is not None:
+            return v
+
+        # 3순위: 같은 줄에 예정발행가 + 확정발행가가 같이 있으면,
+        #       보통주식 값 중 마지막 값을 사용
+        if ("예정발행가" in block_text or "예정발행가액" in block_text) and (
+            "확정발행가" in block_text or "확정발행가액" in block_text
+        ):
+            v = _extract_last_common_stock_price(block_text)
+            if v is not None:
+                return v
+
+        # 4순위: 행을 오른쪽 기준으로 뒤에서부터 스캔
         for row in block_rows:
             row_clean = [normalize_text(x) for x in row]
 
-            for c, cell in enumerate(row_clean):
-                cell_norm = _norm(cell)
+            for c in range(len(row_clean) - 1, -1, -1):
+                cell_norm = _norm(row_clean[c])
 
                 if "보통주식" in cell_norm or "보통주" in cell_norm:
-                    # 같은 행 오른쪽 우선
                     for cand in row_clean[c + 1 : c + 5]:
                         v = _to_int(cand)
                         if v is not None and v >= 50:
                             return v
 
-                    # 같은 행 전체 문자열에서 재시도
-                    joined = " ".join([x for x in row_clean if x])
-                    v2 = _extract_price_preferring_after(joined)
-                    if v2 is not None:
-                        return v2
-
-        # 2순위: 섹션 전체 텍스트에서 보통주식 패턴 찾기
-        block_text = " ".join(
-            [
-                " ".join([normalize_text(x) for x in row if normalize_text(x)])
-                for row in block_rows
-            ]
-        )
-        v3 = _extract_price_preferring_after(block_text)
-        if v3 is not None:
-            return v3
-
-        # 3순위: 6번 섹션 안 첫 유효 숫자
-        for row in block_rows:
-            joined = " ".join([normalize_text(x) for x in row if normalize_text(x)])
-            v4 = _extract_price_preferring_after(joined)
-            if v4 is not None:
-                return v4
+        # 5순위: 블록 전체 일반 fallback
+        v = _extract_price_preferring_after(block_text)
+        if v is not None:
+            return v
 
         return None
 
-    # 1순위: 정정공시
+    # 1순위: 정정공시 corr_after
     if corr_after:
         for k, v in corr_after.items():
             k_raw = normalize_text(k)
             k_norm = _norm(k_raw)
 
             if _is_section6_heading(k_raw) or "6신주발행가액" in k_norm or "6신주의발행가액" in k_norm:
-                # k + v 같이 봐서 정정후가 같이 붙어 있는 경우도 처리
                 merged_text = f"{k_raw} {normalize_text(v)}"
                 price = _extract_price_preferring_after(merged_text)
                 if price is not None:
                     return price
 
-    # 2순위: 실제 표 스캔
+    # 2순위: 실제 표의 6번 섹션
     for df in dfs:
         try:
             arr = df.fillna("").astype(str).values
