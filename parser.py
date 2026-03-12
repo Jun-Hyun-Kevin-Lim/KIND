@@ -3009,8 +3009,9 @@ def parse_bond_record(rec: Dict[str, Any]):
     put_section_val = extract_option_section_from_tables(tables, "put")
     call_section_val = extract_option_section_from_tables(tables, "call")
     
-    print("[DEBUG][PUT]", rec["acpt_no"], put_section_val[:300] if put_section_val else "EMPTY")
-    print("[DEBUG][CALL]", rec["acpt_no"], call_section_val[:300] if call_section_val else "EMPTY")
+    print("[DEBUG]", rec["acpt_no"])
+    print("PUT =", put_section_val[:300] if put_section_val else "EMPTY")
+    print("CALL =", call_section_val[:300] if call_section_val else "EMPTY")
     
     row["Put Option"] = put_section_val or extract_option_details_from_tables(tables, "put")
     row["Call Option"] = call_section_val or extract_option_details_from_tables(tables, "call")
