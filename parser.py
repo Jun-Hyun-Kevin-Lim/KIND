@@ -2151,6 +2151,8 @@ def extract_investors_bond(dfs: List[pd.DataFrame], corr_after: Dict[str, str]) 
 
 # ==========================================================
 # [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
+# ==========================================================
+# [주식연계채권 시트] Put / Call Option 섹션 본문 추출 전용
 # - 신규 우선순위:
 #   0) "9-1. 옵션에 관한 사항" 섹션을 먼저 찾고
 #      그 안에서
@@ -2246,7 +2248,6 @@ def _option_rule_pack(option_type: str) -> Dict[str, List[str]]:
         "anchors": [
             r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
             r"발행회사(?:는|가)",
-            r"회사는",
             r"매도청구권자",
             r"매도청구권을\s*행사",
             r"매수인에게\s*매도하여야\s*한다",
@@ -2623,9 +2624,6 @@ def _slice_option_major_section(corpus: str) -> str:
     return "\n".join(dedup).strip()
 
 
-# ==========================================================
-# [신규] 9-1. 옵션에 관한 사항 섹션 우선 추출
-# ==========================================================
 def _slice_exact_9_1_option_section(corpus: str) -> str:
     if not corpus:
         return ""
@@ -2636,7 +2634,6 @@ def _slice_exact_9_1_option_section(corpus: str) -> str:
         r"\n\s*24\s*[\.\)]\s*정관에\s*정한\s*신주인수권의\s*내용",
         r"\n\s*25\s*[\.\)]",
         r"\n\s*【",
-        r"\n\s*\[",
         r"\n\s*금융위원회\s*/\s*한국거래소\s*귀중",
     ]
 
@@ -2665,21 +2662,66 @@ def _find_first_regex_match(text: str, patterns: List[str], start_pos: int = 0):
     return best
 
 
+def _first_pattern_pos(text: str, patterns: List[str]) -> Optional[int]:
+    if not text:
+        return None
+
+    best = None
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            if best is None or m.start() < best:
+                best = m.start()
+    return best
+
+
+def _is_option_candidate_type_valid(text: str, option_type: str) -> bool:
+    s = normalize_text(text)
+    if not s:
+        return False
+
+    put_signals = [
+        r"조기상환청구권",
+        r"Put\s*Option",
+        r"PUT\s*OPTION",
+        r"풋옵션",
+        r"사채권자는",
+        r"조기상환을\s*청구",
+        r"조기상환청구권을\s*행사",
+    ]
+    call_signals = [
+        r"매도청구권",
+        r"Call\s*Option",
+        r"CALL\s*OPTION",
+        r"콜옵션",
+        r"중도상환청구권",
+        r"발행회사\s*또는\s*발행회사가\s*지정하는\s*자",
+        r"발행회사가\s*지정하는\s*자",
+        r"매도청구권자",
+        r"매도청구권을\s*행사",
+        r"매수인에게\s*매도하여야\s*한다",
+    ]
+
+    put_pos = _first_pattern_pos(s, put_signals)
+    call_pos = _first_pattern_pos(s, call_signals)
+
+    if put_pos is None and call_pos is None:
+        return False
+
+    if option_type == "put":
+        if put_pos is not None and (call_pos is None or put_pos <= call_pos):
+            return True
+        return False
+
+    if call_pos is not None and (put_pos is None or call_pos <= put_pos):
+        return True
+    return False
+
+
 def extract_option_from_9_1_section_first(
     tables: List[pd.DataFrame],
     option_type: str,
 ) -> str:
-    """
-    우선순위:
-    1) 먼저 '9-1. 옵션에 관한 사항' 섹션을 찾는다.
-    2) 그 안에서
-       - put  : [조기상환청구권(Put Option)에 관한 사항]
-       - call : [매도청구권(Call Option)에 관한 사항]
-       를 찾는다.
-    3) 본문은 anchor ~ terminal 기준으로 자르고,
-       terminal이 없으면 다음 소제목/대제목 직전에서 끊는다.
-    4) 못 찾으면 "" 반환 -> 기존 로직 fallback
-    """
     corpus = _option_corpus_from_tables(tables)
     if not corpus:
         return ""
@@ -2704,7 +2746,6 @@ def extract_option_from_9_1_section_first(
             r"\n\s*9\s*-\s*2\s*[\.\)]",
             r"\n\s*10\s*[\.\)]",
             r"\n\s*【",
-            r"\n\s*\[",
         ]
     else:
         start_patterns = [
@@ -2717,7 +2758,6 @@ def extract_option_from_9_1_section_first(
             r"\n\s*9\s*-\s*2\s*[\.\)]",
             r"\n\s*10\s*[\.\)]",
             r"\n\s*【",
-            r"\n\s*\[",
         ]
 
     start_hit = _find_first_regex_match(section_91, start_patterns)
@@ -2736,6 +2776,9 @@ def extract_option_from_9_1_section_first(
 
     candidate = _option_trim_to_body(sub[:end_pos].strip(), option_key)
     if not candidate:
+        return ""
+
+    if not _is_option_candidate_type_valid(candidate, option_key):
         return ""
 
     return candidate
@@ -3160,6 +3203,9 @@ def extract_option_section_from_tables(tables: List[pd.DataFrame], option_type: 
                 if not candidate or len(candidate) < 20:
                     continue
 
+                if not _is_option_candidate_type_valid(candidate, option_key):
+                    continue
+
                 cand_norm = _norm(candidate)
                 if option_key == "put":
                     if "매도청구권" in cand_norm and "조기상환청구권" not in cand_norm and "putoption" not in cand_norm:
@@ -3254,6 +3300,9 @@ def extract_option_details_from_tables(tables: List[pd.DataFrame], option_type: 
     if not result:
         return ""
 
+    if not _is_option_candidate_type_valid(result, option_type):
+        return ""
+
     return result[:500] + ("..." if len(result) > 500 else "")
 
 
@@ -3325,6 +3374,9 @@ def extract_option_block_by_anchor_range(tables: List[pd.DataFrame], option_type
     if not result:
         return ""
 
+    if not _is_option_candidate_type_valid(result, option_type):
+        return ""
+
     return result
 
 
@@ -3393,6 +3445,9 @@ def choose_best_option_value(option_type: str, *candidates: str) -> str:
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
+
+        if not _is_option_candidate_type_valid(cleaned, option_type):
+            continue
 
         score = _score_option_text(cleaned, option_type)
         if score > best_score:
@@ -3469,126 +3524,6 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
                 break
 
     return ratio, ytc
-
-
-# [기간형 날짜 2개 추출]
-# - 전환청구기간 / 교환청구기간 / 권리행사기간 블록에서 시작일/종료일 추출
-def extract_period_dates_from_tables(
-    tables: List[pd.DataFrame],
-    corr_after: Dict[str, str],
-    section_keywords: List[str],
-) -> Tuple[str, str]:
-    date_pat = r"\d{4}[.\-/년]\s*\d{1,2}[.\-/월]\s*\d{1,2}일?"
-
-    def _extract_dates(text: Any) -> List[str]:
-        if not text:
-            return []
-        return re.findall(date_pat, normalize_text(text))
-
-    def _neighbor_dates(arr, rr: int, cc: int) -> List[str]:
-        R, C = arr.shape
-        out = []
-        for r2, c2 in [
-            (rr, cc + 1),
-            (rr, cc + 2),
-            (rr + 1, cc),
-            (rr + 1, cc + 1),
-            (rr + 1, cc + 2),
-            (rr + 2, cc),
-            (rr + 2, cc + 1),
-            (rr + 2, cc + 2),
-        ]:
-            if 0 <= r2 < R and 0 <= c2 < C:
-                out.extend(_extract_dates(arr[r2][c2]))
-
-        row_join = " ".join([normalize_text(x) for x in arr[rr].tolist() if normalize_text(x)])
-        out.extend(_extract_dates(row_join))
-        return out
-
-    if corr_after:
-        for k, v in corr_after.items():
-            if any(_norm(p) in _norm(k) for p in section_keywords):
-                dates = _extract_dates(v)
-                if len(dates) >= 2:
-                    return _format_date(dates[0]), _format_date(dates[-1])
-
-                if "시작일" in str(v) or "종료일" in str(v):
-                    start_date = ""
-                    end_date = ""
-
-                    start_m = re.search(r"시작일.*?(" + date_pat + r")", str(v))
-                    end_m = re.search(r"종료일.*?(" + date_pat + r")", str(v))
-
-                    if start_m:
-                        start_date = _format_date(start_m.group(1))
-                    if end_m:
-                        end_date = _format_date(end_m.group(1))
-
-                    if start_date and end_date:
-                        return start_date, end_date
-
-    for df in tables:
-        try:
-            arr = df.fillna("").astype(str).values
-        except Exception:
-            continue
-
-        R, C = arr.shape
-        for r in range(R):
-            row_vals = [normalize_text(x) for x in arr[r].tolist()]
-            row_join = " ".join([x for x in row_vals if x])
-            row_norm = _norm(row_join)
-
-            if not any(_norm(k) in row_norm for k in section_keywords):
-                continue
-
-            start_date = ""
-            end_date = ""
-
-            for rr in range(r, min(r + 4, R)):
-                local_vals = [normalize_text(x) for x in arr[rr].tolist()]
-                local_join = " ".join([x for x in local_vals if x])
-
-                if "시작일" in local_join and not start_date:
-                    dates = _extract_dates(local_join)
-                    if dates:
-                        start_date = _format_date(dates[-1])
-
-                if "종료일" in local_join and not end_date:
-                    dates = _extract_dates(local_join)
-                    if dates:
-                        end_date = _format_date(dates[-1])
-
-                if start_date and end_date:
-                    return start_date, end_date
-
-            for rr in range(r, min(r + 4, R)):
-                for cc in range(C):
-                    cell = normalize_text(arr[rr][cc])
-
-                    if "시작일" in cell and not start_date:
-                        dates = _neighbor_dates(arr, rr, cc)
-                        if dates:
-                            start_date = _format_date(dates[0])
-
-                    if "종료일" in cell and not end_date:
-                        dates = _neighbor_dates(arr, rr, cc)
-                        if dates:
-                            end_date = _format_date(dates[0])
-
-                if start_date and end_date:
-                    return start_date, end_date
-
-            block_text = []
-            for rr in range(r, min(r + 4, R)):
-                block_text.append(" ".join([normalize_text(x) for x in arr[rr].tolist() if normalize_text(x)]))
-
-            dates = _extract_dates(" ".join(block_text))
-            if len(dates) >= 2:
-                return _format_date(dates[0]), _format_date(dates[1])
-
-    return "", ""
-
 
 # ==========================================================
 # Parsers
@@ -3877,14 +3812,14 @@ def parse_bond_record(rec: Dict[str, Any]):
     )
     row["전환청구 시작"], row["전환청구 종료"] = s_date, e_date
 
-# ==========================================================
-# Put / Call Option
-# 1순위: "9-1. 옵션에 관한 사항" 섹션 안의
-#        [조기상환청구권(Put Option)에 관한 사항]
-#        [매도청구권(Call Option)에 관한 사항]
-# 2순위: 기존 로직 그대로 fallback
-# ==========================================================
-
+    # ==========================================================
+    # Put / Call Option
+    # 1순위: "9-1. 옵션에 관한 사항" 섹션 안의
+    #        [조기상환청구권(Put Option)에 관한 사항]
+    #        [매도청구권(Call Option)에 관한 사항]
+    # 2순위: 기존 로직 그대로 fallback
+    # ==========================================================
+    
     put_from_91 = extract_option_from_9_1_section_first(tables, "put")
     if put_from_91:
         row["Put Option"] = put_from_91
