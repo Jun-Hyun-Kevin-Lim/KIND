@@ -297,6 +297,15 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
         )
     )
 
+    # 표 grid 직접 읽기
+    table_call_ratio, table_ytc, table_pairs = extract_call_ratio_ytc_from_table_grid(tables)
+
+    if not row["Call 비율"] and table_call_ratio:
+        row["Call 비율"] = table_call_ratio
+
+    if not row["YTC"] and table_ytc:
+        row["YTC"] = table_ytc
+
     # 표에서 못 찾으면 9.1 텍스트에서 fallback
     if not row["Call 비율"] or not row["YTC"]:
         ext_ratio, ext_ytc = extract_call_ratio_and_ytc_from_text(section_91)
