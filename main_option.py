@@ -1,10 +1,8 @@
 import os
-import json
 import time
 import random
 from typing import Dict, Any, Optional
 
-import gspread
 from gspread.exceptions import APIError
 from gspread.utils import rowcol_to_a1
 
@@ -82,7 +80,6 @@ def _truncate_sheet_text(value: Any, limit: int = 49000) -> str:
 
 # ==========================================================
 # [워크시트 열기]
-# - parser.py의 gs_open / ensure_ws / load_raw_records 구조 그대로 사용
 # ==========================================================
 def open_worksheets():
     sh = gs_open()
@@ -181,7 +178,7 @@ def update_option_row(
         },
     ]
 
-    gs_retry(ws.batch_update, data, value_input_option="RAW")
+    gs_retry(ws.batch_update, data)
 
 
 # ==========================================================
@@ -205,12 +202,18 @@ def is_bond_title(title: str) -> bool:
 def main():
     raw_ws, bond_ws = open_worksheets()
 
-    # 핵심: parser.py의 RAW 구조 로더를 그대로 사용
+    # parser.py의 RAW 구조 로더를 그대로 사용
     raw_records = load_raw_records(raw_ws)
-    raw_records = [r for r in raw_records if is_bond_title(clean_title(r.get("title", "")))]
+    raw_records = [
+        r for r in raw_records
+        if is_bond_title(clean_title(r.get("title", "")))
+    ]
 
     if RUN_ONLY_ACPTNO:
-        raw_records = [r for r in raw_records if str(r.get("acpt_no", "")).strip() == RUN_ONLY_ACPTNO]
+        raw_records = [
+            r for r in raw_records
+            if str(r.get("acpt_no", "")).strip() == RUN_ONLY_ACPTNO
+        ]
 
     ctx = build_bond_sheet_context(bond_ws)
     row_map = ctx["row_map"]
@@ -241,7 +244,6 @@ def main():
         try:
             parsed = parse_bond_option_record(rec)
 
-            # Put Option이 비어 있으면 표시
             if not str(parsed.get("Put Option", "")).strip():
                 parsed["Put Option"] = "공시 확인 바람"
 
