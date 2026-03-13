@@ -1,11 +1,9 @@
-name: KIND Pipeline -> Google Sheets
+name: KIND Pipeline - RAW + Parse
 
 on:
   workflow_dispatch:
   schedule:
-    # 1. KST 평일 07:00 ~ 08:59 (UTC 일~목 22:00 ~ 23:59)
     - cron: "*/5 22,23 * * 0-4"
-    # 2. KST 평일 09:00 ~ 21:59 (UTC 월~금 00:00 ~ 12:59)
     - cron: "*/5 0-12 * * 1-5"
 
 concurrency:
@@ -13,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  run-kind-pipeline:
+  run-kind-parse:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -36,11 +34,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check env exists
-        run: |
-          echo "GOOGLE_SHEET_ID length: ${#GOOGLE_SHEET_ID}"
-          echo "GOOGLE_CREDENTIALS_JSON length: ${#GOOGLE_CREDENTIALS_JSON}"
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -56,21 +49,7 @@ jobs:
           python -m playwright install chromium
 
       - name: Run RAW scraper
-        run: |
-          python main_raw.py
+        run: python main_raw.py
 
       - name: Run parser
-        run: |
-          python main_parse.py
-
-      - name: Run option parser
-        run: |
-          python main_option.py
-
-      - name: Upload debug artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kind-debug-files
-          path: out/debug/
-          if-no-files-found: ignore
+        run: python main_parse.py
