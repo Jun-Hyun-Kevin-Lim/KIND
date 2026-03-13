@@ -1,5 +1,5 @@
 import re
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 import pandas as pd
 
@@ -74,7 +74,7 @@ def _is_top_heading(text: str) -> bool:
 
 # ==========================================================
 # [9.1 섹션 추출]
-# - Put Option은 기존처럼 9.1 전체를 넣는다
+# - Put Option의 원본 텍스트가 되는 9.1 전체 섹션
 # - 단, "9-1. 옵션에 관한 사항" 제목 자체는 제거
 # ==========================================================
 def _is_91_heading(line: str) -> bool:
@@ -210,10 +210,9 @@ def extract_91_option_section_from_corpus(corpus: str) -> str:
 
 
 # ==========================================================
-# [Call Option block 추출]
-# - 핵심:
-#   Put Option 컬럼에는 9.1 전체(section_91)를 넣고
-#   같은 텍스트 안에서 Call 부분만 잘라서 Call Option 컬럼에 넣는다
+# [Call Option 헤딩 / 종료 패턴]
+# - Call은 Put Option 텍스트 안에서 잘라낸다
+# - Call 헤딩은 삭제하지 않고 같이 가져간다
 # ==========================================================
 CALL_START_PATTERNS = [
     r"\[\s*Call Option에 관한 사항\s*\]",
@@ -229,22 +228,6 @@ CALL_START_PATTERNS = [
     r"중도상환청구권\s*\(\s*CALL OPTION\s*\)",
     r"발행회사의\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항",
     r"발행회사의\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항",
-]
-
-CALL_PREFIX_PATTERNS = [
-    r"^\s*\[\s*Call Option에 관한 사항\s*\]\s*",
-    r"^\s*\[\s*call option에 관한 사항\s*\]\s*",
-    r"^\s*\[\s*매도청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
-    r"^\s*\[\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*\]\s*",
-    r"^\s*\[\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
-    r"^\s*\[\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*\]\s*",
-    r"^\s*<\s*Call Option\s*>\s*",
-    r"^\s*매도청구권\s*\(\s*Call Option\s*\)\s*",
-    r"^\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*",
-    r"^\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*",
-    r"^\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*",
-    r"^\s*\d+\.\s*발행회사의\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*",
-    r"^\s*\d+\.\s*발행회사의\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*",
 ]
 
 CALL_END_PATTERNS = [
@@ -274,13 +257,40 @@ REFERENCE_TAIL_PATTERNS = [
 ]
 
 
-def _strip_call_prefix(text: str) -> str:
-    s = _clean_line(text)
-    for pat in CALL_PREFIX_PATTERNS:
-        s2 = re.sub(pat, "", s, flags=re.IGNORECASE).strip()
-        if s2 != s:
-            return s2
-    return s
+def _find_earliest_match(text: str, patterns: List[str], start_pos: int = 0):
+    best = None
+    for pat in patterns:
+        m = re.search(pat, text[start_pos:], flags=re.IGNORECASE)
+        if m:
+            abs_start = start_pos + m.start()
+            abs_end = start_pos + m.end()
+            if best is None or abs_start < best[0]:
+                best = (abs_start, abs_end, pat)
+    return best
+
+
+def locate_call_option_span(text: str) -> Optional[Tuple[int, int]]:
+    raw = _clean_line(text)
+    if not raw:
+        return None
+
+    start_match = _find_earliest_match(raw, CALL_START_PATTERNS)
+    if not start_match:
+        return None
+
+    start_idx = start_match[0]
+    sub = raw[start_idx:]
+
+    cut = len(sub)
+    end_match = _find_earliest_match(sub[1:], CALL_END_PATTERNS)
+    if end_match:
+        cut = min(cut, end_match[0] + 1)
+
+    end_idx = start_idx + cut
+    if end_idx <= start_idx:
+        return None
+
+    return start_idx, end_idx
 
 
 def _trim_reference_tail(text: str) -> str:
@@ -294,31 +304,35 @@ def extract_call_option_text_from_section(section_text: str) -> str:
     if not section_text:
         return ""
 
-    text = _clean_line(section_text)
-
-    start_match = None
-    for pat in CALL_START_PATTERNS:
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if m:
-            if start_match is None or m.start() < start_match.start():
-                start_match = m
-
-    if not start_match:
+    raw = _clean_line(section_text)
+    span = locate_call_option_span(raw)
+    if not span:
         return ""
 
-    sub = text[start_match.start():]
-
-    cut = len(sub)
-    for pat in CALL_END_PATTERNS:
-        m = re.search(pat, sub[1:], flags=re.IGNORECASE)
-        if m:
-            cut = min(cut, m.start() + 1)
-
-    result = sub[:cut].strip()
-    result = _strip_call_prefix(result)
+    start_idx, end_idx = span
+    result = raw[start_idx:end_idx].strip()
     result = _trim_reference_tail(result)
     result = re.sub(r"\s{2,}", " ", result)
     return result.strip()
+
+
+def remove_call_option_text_from_section(section_text: str) -> str:
+    if not section_text:
+        return ""
+
+    raw = _clean_line(section_text)
+    span = locate_call_option_span(raw)
+    if not span:
+        return raw
+
+    start_idx, end_idx = span
+    kept = (raw[:start_idx] + " " + raw[end_idx:]).strip()
+
+    kept = _trim_reference_tail(kept)
+    kept = re.sub(r"\s{2,}", " ", kept)
+    kept = re.sub(r"\s+([,\.\)])", r"\1", kept)
+    kept = re.sub(r"(\(\s+)", "(", kept)
+    return kept.strip()
 
 
 # ==========================================================
@@ -505,6 +519,8 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
 # ==========================================================
 # [최종 파서]
+# - Put Option = 9.1 전체 - Call block 제거
+# - Call Option = Put 원문 안에서 잘라낸 Call block (헤딩 포함)
 # ==========================================================
 def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     title = clean_title(rec.get("title", "") or "")
@@ -528,16 +544,17 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
 
     section_91 = _clean_line(section_91)
 
-    # 2) Put Option = 기존처럼 9.1 전체
-    row["Put Option"] = section_91 if section_91 else "공시 확인 바람"
-
-    # 3) Call Option = Put 텍스트(=section_91) 안에서 Call 부분만 잘라냄
+    # 2) section_91에서 Call block 추출 (헤딩 포함)
     call_text = extract_call_option_text_from_section(section_91)
 
     # 9.1 안에서 못 찾으면 전체 corpus에서 fallback
     if not call_text:
         call_text = extract_call_option_text_from_section(corpus)
 
+    # 3) Put Option에서는 Call block 제거
+    put_text = remove_call_option_text_from_section(section_91) if call_text else section_91
+
+    row["Put Option"] = put_text if put_text else "공시 확인 바람"
     row["Call Option"] = call_text if call_text else "공시 확인 바람"
 
     # 4) Call 비율 / YTC : 표 key-value 우선
