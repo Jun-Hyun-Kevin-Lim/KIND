@@ -202,7 +202,6 @@ def is_bond_title(title: str) -> bool:
 def main():
     raw_ws, bond_ws = open_worksheets()
 
-    # parser.py의 RAW 구조 로더를 그대로 사용
     raw_records = load_raw_records(raw_ws)
     raw_records = [
         r for r in raw_records
@@ -246,6 +245,8 @@ def main():
 
             if not str(parsed.get("Put Option", "")).strip():
                 parsed["Put Option"] = "공시 확인 바람"
+            if not str(parsed.get("Call Option", "")).strip():
+                parsed["Call Option"] = "공시 확인 바람"
 
             update_option_row(
                 bond_ws,
@@ -258,7 +259,7 @@ def main():
             )
 
             put_found = parsed.get("Put Option", "") != "공시 확인 바람"
-            call_found = bool(str(parsed.get("Call Option", "")).strip())
+            call_found = parsed.get("Call Option", "") != "공시 확인 바람"
 
             print(
                 f"[OK][OPTION][UPDATE] {acptno} {title} "
