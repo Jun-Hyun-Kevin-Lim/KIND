@@ -210,6 +210,142 @@ def extract_91_option_section_from_corpus(corpus: str) -> str:
 
 
 # ==========================================================
+# [추가 fallback 전용]
+# - 기존 로직 건드리지 않음
+# - 9.1 안에 22/23 참고문구가 있을 때만 별도 사용
+# ==========================================================
+OTHER_OPTION_REF_PATTERNS = [
+    (22, r"22\s*[\.\)]?\s*기타\s*투자\s*판단에\s*참고할\s*사항"),
+    (23, r"23\s*[\.\)]?\s*기타\s*투자\s*판단에\s*참고할\s*사항"),
+]
+
+
+def find_referenced_other_option_sections(text: str) -> List[int]:
+    s = _clean_line(text)
+    if not s:
+        return []
+
+    refs = []
+    for sec_no, pat in OTHER_OPTION_REF_PATTERNS:
+        if re.search(pat, s, flags=re.IGNORECASE):
+            refs.append(sec_no)
+    return refs
+
+
+def _is_other_option_section_heading(line: str, section_no: int) -> bool:
+    s = _clean_line(line)
+    if not s:
+        return False
+    pat = rf"^{section_no}\s*[\.\)]?\s*기타\s*투자\s*판단에\s*참고할\s*사항"
+    return bool(re.search(pat, s, flags=re.IGNORECASE))
+
+
+def _looks_like_option_detail_text(text: str) -> bool:
+    s = _clean_line(text)
+    if not s:
+        return False
+
+    kws = [
+        "Put Option",
+        "Call Option",
+        "조기상환청구권",
+        "매도청구권",
+        "중도상환청구권",
+        "콜옵션",
+        "풋옵션",
+    ]
+    s_low = s.lower()
+    return any(k.lower() in s_low for k in kws)
+
+
+def extract_other_option_section_from_lines(lines: List[str], section_no: int) -> str:
+    if not lines:
+        return ""
+
+    started = False
+    bucket = []
+
+    for line in lines:
+        s = _clean_line(line)
+        if not s:
+            continue
+
+        if not started:
+            if _is_other_option_section_heading(s, section_no):
+                started = True
+                bucket.append(s)  # 헤딩 포함 유지
+            continue
+
+        if _is_top_heading(s) and not _is_other_option_section_heading(s, section_no):
+            break
+
+        bucket.append(s)
+
+    text = " ".join(bucket).strip()
+    text = re.sub(r"\s{2,}", " ", text)
+    return text
+
+
+def extract_other_option_section_from_corpus(corpus: str, section_no: int) -> str:
+    if not corpus:
+        return ""
+
+    start_pat = rf"(?:^|\n)\s*{section_no}\s*[\.\)]?\s*기타\s*투자\s*판단에\s*참고할\s*사항"
+    m = re.search(start_pat, corpus, flags=re.IGNORECASE | re.MULTILINE)
+    if not m:
+        return ""
+
+    start_idx = m.start()
+    sub = corpus[start_idx:]
+
+    end_patterns = [
+        r"(?:^|\n)\s*24\s*[\.\)]?\s*[가-힣A-Za-z\(]",
+        r"(?:^|\n)\s*25\s*[\.\)]?\s*[가-힣A-Za-z\(]",
+    ]
+    if section_no == 22:
+        end_patterns.insert(0, r"(?:^|\n)\s*23\s*[\.\)]?\s*[가-힣A-Za-z\(]")
+
+    cut = len(sub)
+    for pat in end_patterns:
+        m2 = re.search(pat, sub[1:], flags=re.IGNORECASE | re.MULTILINE)
+        if m2:
+            cut = min(cut, m2.start() + 1)
+
+    text = sub[:cut].strip()
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+def extract_referenced_option_source_section(
+    lines: List[str],
+    corpus: str,
+    section_91_text: str,
+) -> str:
+    refs = find_referenced_other_option_sections(section_91_text)
+    if not refs:
+        return ""
+
+    candidates = []
+
+    for sec_no in refs:
+        sec_text = extract_other_option_section_from_lines(lines, sec_no)
+        if not sec_text:
+            sec_text = extract_other_option_section_from_corpus(corpus, sec_no)
+
+        sec_text = _clean_line(sec_text)
+        if sec_text:
+            candidates.append(sec_text)
+
+    for text in candidates:
+        if _looks_like_option_detail_text(text):
+            return text
+
+    return candidates[0] if candidates else ""
+
+
+# ==========================================================
 # [Call Option 헤딩 / 종료 패턴]
 # - Call은 Put Option 텍스트 안에서 잘라낸다
 # - Call 헤딩은 삭제하지 않고 같이 가져간다
@@ -519,8 +655,8 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
 
 # ==========================================================
 # [최종 파서]
-# - Put Option = 9.1 전체 - Call block 제거
-# - Call Option = Put 원문 안에서 잘라낸 Call block (헤딩 포함)
+# - 기존 로직 유지
+# - 추가로 9.1 안에 22/23 참고문구가 있을 때만 2차 fallback 수행
 # ==========================================================
 def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     title = clean_title(rec.get("title", "") or "")
@@ -553,6 +689,30 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
 
     # 3) Put Option에서는 Call block 제거
     put_text = remove_call_option_text_from_section(section_91) if call_text else section_91
+
+    # ------------------------------------------------------
+    # [2차 fallback]
+    # 기존 로직은 그대로 두고,
+    # 9.1 안에 22/23 참고문구가 있을 때만 추가로 재파싱
+    # ------------------------------------------------------
+    refs = find_referenced_other_option_sections(section_91)
+    if refs:
+        ref_source = extract_referenced_option_source_section(lines, corpus, section_91)
+        if ref_source:
+            ref_call_text = extract_call_option_text_from_section(ref_source)
+            if not ref_call_text:
+                ref_call_text = extract_call_option_text_from_section(corpus)
+
+            ref_put_text = (
+                remove_call_option_text_from_section(ref_source)
+                if ref_call_text else ref_source
+            )
+
+            # 2차 로직 결과가 있으면 그때만 override
+            if str(ref_put_text).strip():
+                put_text = ref_put_text
+            if str(ref_call_text).strip():
+                call_text = ref_call_text
 
     row["Put Option"] = put_text if put_text else "공시 확인 바람"
     row["Call Option"] = call_text if call_text else "공시 확인 바람"
