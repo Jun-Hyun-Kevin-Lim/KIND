@@ -73,182 +73,252 @@ def _is_top_heading(text: str) -> bool:
 
 
 # ==========================================================
-# [Call / Put 시작 / 종료 패턴]
+# [9.1 섹션 추출]
+# - Put Option은 기존처럼 9.1 전체를 넣는다
+# - 단, "9-1. 옵션에 관한 사항" 제목 자체는 제거
+# ==========================================================
+def _is_91_heading(line: str) -> bool:
+    s = _clean_line(line)
+    if not s:
+        return False
+
+    patterns = [
+        r"^9\s*[\.\-]?\s*1\s*[\)\.]?\s*옵션에\s*관한\s*사항",
+        r"^9\s*[\.\-]?\s*1\s*[\)\.]?\s*옵션사항",
+    ]
+    return any(re.search(p, s, flags=re.IGNORECASE) for p in patterns)
+
+
+def _is_next_major_heading(line: str) -> bool:
+    s = _clean_line(line)
+    if not s:
+        return False
+
+    stop_patterns = [
+        r"^9\s*[\.\-]?\s*2\s*[\)\.]?",
+        r"^9\s*[\.\-]?\s*3\s*[\)\.]?",
+        r"^10\s*[\)\.]?",
+        r"^11\s*[\)\.]?",
+        r"^12\s*[\)\.]?",
+        r"^13\s*[\)\.]?",
+        r"^20\s*[\)\.]?",
+        r"^21\s*[\)\.]?",
+        r"^22\s*[\)\.]?",
+        r"^23\s*[\)\.]?",
+        r"^24\s*[\)\.]?",
+        r"^25\s*[\)\.]?",
+    ]
+    return any(re.search(p, s, flags=re.IGNORECASE) for p in stop_patterns)
+
+
+def _strip_91_heading_prefix(text: str) -> str:
+    s = _clean_line(text)
+    if not s:
+        return ""
+
+    patterns = [
+        r"^\s*9\s*[\.\-]?\s*1\s*[\)\.]?\s*옵션에\s*관한\s*사항\s*[:：]?\s*",
+        r"^\s*9\s*[\.\-]?\s*1\s*[\)\.]?\s*옵션사항\s*[:：]?\s*",
+    ]
+
+    for pat in patterns:
+        new_s = re.sub(pat, "", s, flags=re.IGNORECASE).strip()
+        if new_s != s:
+            return new_s
+
+    return s
+
+
+def extract_91_option_section_from_lines(lines: List[str]) -> str:
+    if not lines:
+        return ""
+
+    started = False
+    bucket = []
+
+    for line in lines:
+        s = _clean_line(line)
+        if not s:
+            continue
+
+        if not started:
+            if _is_91_heading(s):
+                started = True
+                first_body = _strip_91_heading_prefix(s)
+                if first_body:
+                    bucket.append(first_body)
+            continue
+
+        if _is_next_major_heading(s):
+            break
+
+        bucket.append(s)
+
+    text = " ".join(bucket).strip()
+    text = re.sub(r"\s{2,}", " ", text)
+    return text
+
+
+def extract_91_option_section_from_corpus(corpus: str) -> str:
+    if not corpus:
+        return ""
+
+    start_patterns = [
+        r"(?:^|\n)\s*9\s*[\.\-]?\s*1\s*[\)\.]?\s*옵션에\s*관한\s*사항",
+        r"(?:^|\n)\s*9\s*[\.\-]?\s*1\s*[\)\.]?\s*옵션사항",
+    ]
+
+    start_match = None
+    for pat in start_patterns:
+        m = re.search(pat, corpus, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            if start_match is None or m.start() < start_match.start():
+                start_match = m
+
+    if not start_match:
+        return ""
+
+    start_idx = start_match.end()
+    sub = corpus[start_idx:]
+
+    end_patterns = [
+        r"(?:^|\n)\s*9\s*[\.\-]?\s*2\s*[\)\.]?",
+        r"(?:^|\n)\s*9\s*[\.\-]?\s*3\s*[\)\.]?",
+        r"(?:^|\n)\s*10\s*[\)\.]?",
+        r"(?:^|\n)\s*11\s*[\)\.]?",
+        r"(?:^|\n)\s*12\s*[\)\.]?",
+        r"(?:^|\n)\s*13\s*[\)\.]?",
+        r"(?:^|\n)\s*20\s*[\)\.]?",
+        r"(?:^|\n)\s*21\s*[\)\.]?",
+        r"(?:^|\n)\s*22\s*[\)\.]?",
+        r"(?:^|\n)\s*23\s*[\)\.]?",
+        r"(?:^|\n)\s*24\s*[\)\.]?",
+        r"(?:^|\n)\s*25\s*[\)\.]?",
+    ]
+
+    cut = len(sub)
+    for pat in end_patterns:
+        m = re.search(pat, sub, flags=re.IGNORECASE | re.MULTILINE)
+        if m and m.start() > 0:
+            cut = min(cut, m.start())
+
+    text = sub[:cut].strip()
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s*\|\s*", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+# ==========================================================
+# [Call Option block 추출]
+# - 핵심:
+#   Put Option 컬럼에는 9.1 전체(section_91)를 넣고
+#   같은 텍스트 안에서 Call 부분만 잘라서 Call Option 컬럼에 넣는다
 # ==========================================================
 CALL_START_PATTERNS = [
     r"\[\s*Call Option에 관한 사항\s*\]",
     r"\[\s*call option에 관한 사항\s*\]",
-    r"\[\s*매도청구권\s*\(\s*Call Option\s*\)\s*에 관한 사항\s*\]",
-    r"\[\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*에 관한 사항\s*\]",
-    r"\[\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에 관한 사항\s*\]",
-    r"^\s*매도청구권\s*\(\s*Call Option\s*\)\s*$",
-    r"^\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*$",
-    r"^\s*<\s*Call Option\s*>\s*",
-    r"^\s*\d+\.\s*발행회사의\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에 관한 사항",
+    r"\[\s*매도청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*\]",
+    r"\[\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+    r"\[\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*\]",
+    r"\[\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*\]",
+    r"<\s*Call Option\s*>",
+    r"매도청구권\s*\(\s*Call Option\s*\)",
+    r"매도청구권\s*\(\s*CALL OPTION\s*\)",
+    r"중도상환청구권\s*\(\s*Call Option\s*\)",
+    r"중도상환청구권\s*\(\s*CALL OPTION\s*\)",
+    r"발행회사의\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항",
+    r"발행회사의\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항",
 ]
 
 CALL_PREFIX_PATTERNS = [
     r"^\s*\[\s*Call Option에 관한 사항\s*\]\s*",
     r"^\s*\[\s*call option에 관한 사항\s*\]\s*",
-    r"^\s*\[\s*매도청구권\s*\(\s*Call Option\s*\)\s*에 관한 사항\s*\]\s*",
-    r"^\s*\[\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*에 관한 사항\s*\]\s*",
-    r"^\s*\[\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에 관한 사항\s*\]\s*",
+    r"^\s*\[\s*매도청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
+    r"^\s*\[\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*\]\s*",
+    r"^\s*\[\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*\]\s*",
+    r"^\s*\[\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*\]\s*",
+    r"^\s*<\s*Call Option\s*>\s*",
     r"^\s*매도청구권\s*\(\s*Call Option\s*\)\s*",
     r"^\s*매도청구권\s*\(\s*CALL OPTION\s*\)\s*",
-    r"^\s*<\s*Call Option\s*>\s*",
-    r"^\s*\d+\.\s*발행회사의\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에 관한 사항\s*",
+    r"^\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*",
+    r"^\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*",
+    r"^\s*\d+\.\s*발행회사의\s*중도상환청구권\s*\(\s*Call Option\s*\)\s*에\s*관한\s*사항\s*",
+    r"^\s*\d+\.\s*발행회사의\s*중도상환청구권\s*\(\s*CALL OPTION\s*\)\s*에\s*관한\s*사항\s*",
 ]
 
-PUT_START_PATTERNS = [
-    r"\[\s*Put Option에 관한 사항\s*\]",
-    r"\[\s*조기상환청구권\s*\(\s*Put Option\s*\)\s*에 관한 사항\s*\]",
-    r"\[\s*사채권자의 조기상환청구권\s*\]",
-    r"^\s*Put Option\s*$",
-    r"^\s*조기상환청구권\s*\(\s*Put Option\s*\)",
-    r"^\s*사채권자의 조기상환청구권",
+CALL_END_PATTERNS = [
+    r"이\s*외\s*Put Option",
+    r"조기상환청구권\s*\(\s*Put Option\s*\)",
+    r"사채권자의\s*조기상환청구권",
+    r"(?:^|[\s\]])9\s*[-\.]?\s*2\s*[\)\.]?\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])9\s*[-\.]?\s*3\s*[\)\.]?\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])10\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])11\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])12\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])13\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])20\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])21\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])22\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])23\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])24\.\s*[가-힣A-Za-z\(]",
+    r"(?:^|[\s\]])25\.\s*[가-힣A-Za-z\(]",
 ]
 
-PUT_PREFIX_PATTERNS = [
-    r"^\s*\[\s*Put Option에 관한 사항\s*\]\s*",
-    r"^\s*\[\s*조기상환청구권\s*\(\s*Put Option\s*\)\s*에 관한 사항\s*\]\s*",
-    r"^\s*\[\s*사채권자의 조기상환청구권\s*\]\s*",
-    r"^\s*Put Option\s*",
-    r"^\s*조기상환청구권\s*\(\s*Put Option\s*\)\s*",
-    r"^\s*사채권자의 조기상환청구권\s*",
-]
-
-NEXT_MAJOR_PATTERNS = [
-    r"^\s*9\s*[\.\-]?\s*2",
-    r"^\s*9\s*[\.\-]?\s*3",
-    r"^\s*10\s*[\.\)]",
-    r"^\s*11\s*[\.\)]",
-    r"^\s*12\s*[\.\)]",
-    r"^\s*13\s*[\.\)]",
-    r"^\s*20\s*[\.\)]",
-    r"^\s*21\s*[\.\)]",
-    r"^\s*22\s*[\.\)]",
-    r"^\s*23\s*[\.\)]",
-    r"^\s*24\s*[\.\)]",
-    r"^\s*25\s*[\.\)]",
+REFERENCE_TAIL_PATTERNS = [
+    r'\s*(?:이\s*외|이외)\s*.*?기타 투자판단에 참고할 사항.*$',
+    r'\s*세부내용은\s*.*?기타 투자판단에 참고할 사항.*$',
+    r'\s*상세내용은\s*.*?기타 투자판단에 참고할 사항.*$',
+    r'\s*".*?기타 투자판단에 참고할 사항".*$',
+    r'\s*을\s*참고(?:하여)?\s*주시기\s*바랍니다\.?$',
 ]
 
 
-# ==========================================================
-# [패턴 판별]
-# ==========================================================
-def _matches_any(text: str, patterns: List[str]) -> bool:
+def _strip_call_prefix(text: str) -> str:
     s = _clean_line(text)
-    return any(re.search(p, s, flags=re.IGNORECASE) for p in patterns)
-
-
-def is_call_start_line(line: str) -> bool:
-    return _matches_any(line, CALL_START_PATTERNS)
-
-
-def is_put_start_line(line: str) -> bool:
-    return _matches_any(line, PUT_START_PATTERNS)
-
-
-def is_next_major_line(line: str) -> bool:
-    return _matches_any(line, NEXT_MAJOR_PATTERNS)
-
-
-def strip_prefix(text: str, patterns: List[str]) -> str:
-    s = _clean_line(text)
-    for p in patterns:
-        s2 = re.sub(p, "", s, flags=re.IGNORECASE).strip()
+    for pat in CALL_PREFIX_PATTERNS:
+        s2 = re.sub(pat, "", s, flags=re.IGNORECASE).strip()
         if s2 != s:
             return s2
     return s
 
 
-# ==========================================================
-# [끝부분 참고문장 제거]
-# ==========================================================
-def trim_reference_sentences(text: str) -> str:
+def _trim_reference_tail(text: str) -> str:
     s = _clean_line(text)
-
-    ref_patterns = [
-        r'(이 외 .*?기타 투자판단에 참고할 사항.*)$',
-        r'(세부내용은 .*?기타 투자판단에 참고할 사항.*)$',
-        r'(.*?기타 투자판단에 참고할 사항을 참고.*)$',
-        r'(.*?참고하시기 바랍니다\.)$',
-        r'(.*?참고하여 주시기 바랍니다\.)$',
-    ]
-
-    for p in ref_patterns:
-        s = re.sub(p, "", s, flags=re.IGNORECASE).strip()
-
+    for pat in REFERENCE_TAIL_PATTERNS:
+        s = re.sub(pat, "", s, flags=re.IGNORECASE).strip()
     return s
 
 
-# ==========================================================
-# [Call / Put 블록 추출]
-# ==========================================================
-def extract_call_option_text_from_lines(lines: List[str]) -> str:
-    started = False
-    bucket = []
+def extract_call_option_text_from_section(section_text: str) -> str:
+    if not section_text:
+        return ""
 
-    for line in lines:
-        s = _clean_line(line)
-        if not s:
-            continue
+    text = _clean_line(section_text)
 
-        if not started:
-            if is_call_start_line(s):
-                started = True
-                body = strip_prefix(s, CALL_PREFIX_PATTERNS)
-                if body:
-                    bucket.append(body)
-            continue
+    start_match = None
+    for pat in CALL_START_PATTERNS:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            if start_match is None or m.start() < start_match.start():
+                start_match = m
 
-        # Call 시작 후 Put 시작이 나오면 종료
-        if is_put_start_line(s):
-            break
+    if not start_match:
+        return ""
 
-        # 다음 대목차 나오면 종료
-        if is_next_major_line(s):
-            break
+    sub = text[start_match.start():]
 
-        bucket.append(s)
+    cut = len(sub)
+    for pat in CALL_END_PATTERNS:
+        m = re.search(pat, sub[1:], flags=re.IGNORECASE)
+        if m:
+            cut = min(cut, m.start() + 1)
 
-    text = " ".join(bucket).strip()
-    text = trim_reference_sentences(text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text
-
-
-def extract_put_option_text_from_lines(lines: List[str]) -> str:
-    started = False
-    bucket = []
-
-    for line in lines:
-        s = _clean_line(line)
-        if not s:
-            continue
-
-        if not started:
-            if is_put_start_line(s):
-                started = True
-                body = strip_prefix(s, PUT_PREFIX_PATTERNS)
-                if body:
-                    bucket.append(body)
-            continue
-
-        # Put 시작 후 Call 시작이 나오면 종료
-        if is_call_start_line(s):
-            break
-
-        # 다음 대목차 나오면 종료
-        if is_next_major_line(s):
-            break
-
-        bucket.append(s)
-
-    text = " ".join(bucket).strip()
-    text = trim_reference_sentences(text)
-    text = re.sub(r"\s{2,}", " ", text)
-    return text
+    result = sub[:cut].strip()
+    result = _strip_call_prefix(result)
+    result = _trim_reference_tail(result)
+    result = re.sub(r"\s{2,}", " ", result)
+    return result.strip()
 
 
 # ==========================================================
@@ -286,7 +356,7 @@ def _to_pct_text(cell: Any, min_v: float = None, max_v: float = None) -> str:
 
 def extract_call_ratio_ytc_from_table_grid(
     tables: List[pd.DataFrame],
-) -> Tuple[str, str]:
+) -> Tuple[str, str, List[Tuple[str, str]]]:
     call_header_kws = [
         "Call비율",
         "콜옵션비율",
@@ -301,7 +371,7 @@ def extract_call_ratio_ytc_from_table_grid(
         "매도청구수익률",
     ]
 
-    pairs = []
+    pairs: List[Tuple[str, str]] = []
 
     for df in tables:
         try:
@@ -338,41 +408,64 @@ def extract_call_ratio_ytc_from_table_grid(
         if header_row is None:
             continue
 
+        blank_streak = 0
         for rr in range(header_row + 1, R):
             row_vals = [normalize_text(x) for x in arr[rr].tolist()]
             row_join = " ".join([x for x in row_vals if x])
 
             if not row_join:
+                blank_streak += 1
+                if blank_streak >= 2:
+                    break
                 continue
+            blank_streak = 0
 
             first_nonempty = next((x for x in row_vals if x), "")
             if _is_top_heading(first_nonempty):
                 break
 
-            call_val = _to_pct_text(arr[rr][call_col], min_v=0, max_v=100) if call_col is not None else ""
-            ytc_val = _to_pct_text(arr[rr][ytc_col], min_v=0, max_v=30) if ytc_col is not None else ""
+            call_val = ""
+            ytc_val = ""
+
+            if call_col is not None and call_col < C:
+                call_val = _to_pct_text(arr[rr][call_col], min_v=0, max_v=100)
+
+            if ytc_col is not None and ytc_col < C:
+                ytc_val = _to_pct_text(arr[rr][ytc_col], min_v=0, max_v=30)
+
+            if not call_val and call_col is not None:
+                for cc in range(max(0, call_col - 1), min(C, call_col + 2)):
+                    call_val = _to_pct_text(arr[rr][cc], min_v=0, max_v=100)
+                    if call_val:
+                        break
+
+            if not ytc_val and ytc_col is not None:
+                for cc in range(max(0, ytc_col - 1), min(C, ytc_col + 2)):
+                    ytc_val = _to_pct_text(arr[rr][cc], min_v=0, max_v=30)
+                    if ytc_val:
+                        break
 
             if call_val or ytc_val:
                 pairs.append((call_val, ytc_val))
 
-    uniq = []
+    uniq_pairs = []
     for p in pairs:
-        if p not in uniq:
-            uniq.append(p)
+        if p not in uniq_pairs:
+            uniq_pairs.append(p)
 
-    for call_val, ytc_val in uniq:
+    for call_val, ytc_val in uniq_pairs:
         if call_val and ytc_val:
-            return call_val, ytc_val
+            return call_val, ytc_val, uniq_pairs
 
-    for call_val, ytc_val in uniq:
+    for call_val, ytc_val in uniq_pairs:
         if call_val or ytc_val:
-            return call_val, ytc_val
+            return call_val, ytc_val, uniq_pairs
 
-    return "", ""
+    return "", "", []
 
 
 # ==========================================================
-# [본문 fallback]
+# [Call 본문에서 Call 비율 / YTC 추출]
 # ==========================================================
 def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
     if not text:
@@ -384,12 +477,15 @@ def extract_call_ratio_and_ytc_from_text(text: str) -> Tuple[str, str]:
     ratio_patterns = [
         r"(?:행사비율|콜옵션비율|매도청구권\s*행사비율|Call\s*비율)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%",
         r"(?:권면총액|권면액|전자등록총액|전자등록금액|인수금액|발행금액|사채원금)\s*(?:의|중)\s*(\d+(?:\.\d+)?)\s*%",
+        r"(\d+(?:\.\d+)?)\s*%\s*(?:에\s*해당하는|이내의\s*범위|총\s*한도로)",
     ]
     ytc_patterns = [
         r"(?:YTC|매도청구권보장수익률|매도청구수익률|조기상환수익률|조기상환이율|연복리수익률)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%",
-        r"연\s*(\d+(?:\.\d+)?)\s*%\s*\(\s*3개월\s*단위\s*복리계산\s*\)",
+        r"연\s*복리\s*(\d+(?:\.\d+)?)\s*%",
         r"연복리\s*(\d+(?:\.\d+)?)\s*%",
         r"IRR.*?연\s*(\d+(?:\.\d+)?)\s*%",
+        r"내부수익률.*?연\s*(\d+(?:\.\d+)?)\s*%",
+        r"연\s*(\d+(?:\.\d+)?)\s*%\s*\(\s*3개월\s*단위\s*복리계산\s*\)",
     ]
 
     for pat in ratio_patterns:
@@ -425,14 +521,26 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
     lines = _lines_from_tables(tables)
     corpus = _corpus_from_lines(lines)
 
-    # 1) 텍스트 블록 추출
-    put_text = extract_put_option_text_from_lines(lines)
-    call_text = extract_call_option_text_from_lines(lines)
+    # 1) 9.1 전체 섹션 추출
+    section_91 = extract_91_option_section_from_lines(lines)
+    if not section_91:
+        section_91 = extract_91_option_section_from_corpus(corpus)
 
-    row["Put Option"] = put_text if put_text else "공시 확인 바람"
+    section_91 = _clean_line(section_91)
+
+    # 2) Put Option = 기존처럼 9.1 전체
+    row["Put Option"] = section_91 if section_91 else "공시 확인 바람"
+
+    # 3) Call Option = Put 텍스트(=section_91) 안에서 Call 부분만 잘라냄
+    call_text = extract_call_option_text_from_section(section_91)
+
+    # 9.1 안에서 못 찾으면 전체 corpus에서 fallback
+    if not call_text:
+        call_text = extract_call_option_text_from_section(corpus)
+
     row["Call Option"] = call_text if call_text else "공시 확인 바람"
 
-    # 2) 표 key-value 우선
+    # 4) Call 비율 / YTC : 표 key-value 우선
     row["Call 비율"] = _safe_percent(
         scan_label_value_preferring_correction(
             tables,
@@ -449,22 +557,22 @@ def parse_bond_option_record(rec: Dict[str, Any]) -> Dict[str, str]:
         )
     )
 
-    # 3) 표 grid fallback
+    # 5) 표 grid fallback
     if not row["Call 비율"] or not row["YTC"]:
-        table_ratio, table_ytc = extract_call_ratio_ytc_from_table_grid(tables)
+        table_ratio, table_ytc, _ = extract_call_ratio_ytc_from_table_grid(tables)
 
         if not row["Call 비율"]:
             row["Call 비율"] = table_ratio
         if not row["YTC"]:
             row["YTC"] = table_ytc
 
-    # 4) Call 본문 fallback
+    # 6) Call 본문 fallback
     if (not row["Call 비율"] or not row["YTC"]) and call_text and call_text != "공시 확인 바람":
-        txt_ratio, txt_ytc = extract_call_ratio_and_ytc_from_text(call_text)
+        ext_ratio, ext_ytc = extract_call_ratio_and_ytc_from_text(call_text)
 
         if not row["Call 비율"]:
-            row["Call 비율"] = txt_ratio
+            row["Call 비율"] = ext_ratio
         if not row["YTC"]:
-            row["YTC"] = txt_ytc
+            row["YTC"] = ext_ytc
 
     return row
